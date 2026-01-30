@@ -1,0 +1,393 @@
+//! Storage layer for Clawprint
+//!
+//! Uses SQLite for events + filesystem for compressed artifacts.
+//! Implements hash chain verification.
+
+use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use tracing::{debug, info, warn};
+
+use crate::{Event, EventId, EventKind, RunId, RunMeta};
+
+/// Storage manager for a single run
+pub struct RunStorage {
+    run_id: RunId,
+    base_path: PathBuf,
+    db: Connection,
+    last_hash: Option<String>,
+    event_count: u64,
+    batch_buffer: Vec<Event>,
+    batch_size: usize,
+}
+
+impl RunStorage {
+    /// Create new storage for a run
+    pub fn new(run_id: RunId, base_path: &Path, batch_size: usize) -> Result<Self> {
+        let run_path = base_path.join("runs").join(&run_id.0);
+        fs::create_dir_all(&run_path)?;
+        fs::create_dir_all(run_path.join("artifacts"))?;
+
+        let db_path = run_path.join("ledger.sqlite");
+        let db = Connection::open(&db_path)?;
+
+        // Enable WAL mode for better concurrent performance
+        db.execute("PRAGMA journal_mode=WAL", [])?;
+        db.execute("PRAGMA synchronous=NORMAL", [])?;
+
+        // Create tables
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS events (
+                event_id INTEGER PRIMARY KEY,
+                ts TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                span_id TEXT,
+                parent_span_id TEXT,
+                actor TEXT,
+                payload TEXT NOT NULL,
+                artifact_refs TEXT,
+                hash_prev TEXT,
+                hash_self TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind)",
+            [],
+        )?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)",
+            [],
+        )?;
+
+        info!("Created storage for run {} at {:?}", run_id.0, run_path);
+
+        Ok(Self {
+            run_id,
+            base_path: run_path,
+            db,
+            last_hash: None,
+            event_count: 0,
+            batch_buffer: Vec::with_capacity(batch_size),
+            batch_size,
+        })
+    }
+
+    /// Open existing run storage
+    pub fn open(run_id: RunId, base_path: &Path) -> Result<Self> {
+        let run_path = base_path.join("runs").join(&run_id.0);
+        let db_path = run_path.join("ledger.sqlite");
+        
+        if !db_path.exists() {
+            return Err(anyhow!("Run {} not found at {:?}", run_id.0, run_path));
+        }
+
+        let db = Connection::open(&db_path)?;
+        
+        // Get last hash for chain continuation
+        let last_hash: Option<String> = db
+            .query_row(
+                "SELECT hash_self FROM events ORDER BY event_id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let event_count: u64 = db.query_row(
+            "SELECT COUNT(*) FROM events",
+            [],
+            |row| row.get(0),
+        )?;
+
+        info!("Opened storage for run {} ({} events)", run_id.0, event_count);
+
+        Ok(Self {
+            run_id,
+            base_path: run_path,
+            db,
+            last_hash,
+            event_count,
+            batch_buffer: Vec::with_capacity(100),
+            batch_size: 100,
+        })
+    }
+
+    /// Write event to storage
+    pub fn write_event(&mut self, event: Event) -> Result<()> {
+        self.batch_buffer.push(event);
+        
+        if self.batch_buffer.len() >= self.batch_size {
+            self.flush()?;
+        }
+        
+        Ok(())
+    }
+
+    /// Flush batch to database
+    pub fn flush(&mut self) -> Result<()> {
+        if self.batch_buffer.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.db.transaction()?;
+        
+        for event in &self.batch_buffer {
+            tx.execute(
+                "INSERT INTO events 
+                 (event_id, ts, kind, span_id, parent_span_id, actor, payload, artifact_refs, hash_prev, hash_self)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    event.event_id.0 as i64,
+                    event.ts.to_rfc3339(),
+                    format!("{:?}", event.kind),
+                    event.span_id,
+                    event.parent_span_id,
+                    event.actor,
+                    serde_json::to_string(&event.payload)?,
+                    serde_json::to_string(&event.artifact_refs)?,
+                    event.hash_prev,
+                    event.hash_self,
+                ],
+            )?;
+            self.last_hash = Some(event.hash_self.clone());
+            self.event_count += 1;
+        }
+
+        tx.commit()?;
+        self.batch_buffer.clear();
+        
+        debug!("Flushed {} events to storage", self.event_count);
+        
+        Ok(())
+    }
+
+    /// Store artifact (compressed)
+    pub fn store_artifact(&self, data: &[u8]) -> Result<String> {
+        // Compute hash
+        use sha2::{Sha256, Digest};
+        let hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize())
+        };
+
+        // Check if already exists
+        let prefix = &hash[..2];
+        let artifact_dir = self.base_path.join("artifacts").join(prefix);
+        let artifact_path = artifact_dir.join(format!("{}.zst", &hash));
+
+        if artifact_path.exists() {
+            debug!("Artifact {} already exists", hash);
+            return Ok(hash);
+        }
+
+        // Compress and store
+        fs::create_dir_all(&artifact_dir)?;
+        let compressed = zstd::encode_all(data, 3)?;
+        let mut file = fs::File::create(&artifact_path)?;
+        file.write_all(&compressed)?;
+
+        debug!("Stored artifact {} ({} bytes -> {} bytes)", 
+               hash, data.len(), compressed.len());
+
+        Ok(hash)
+    }
+
+    /// Retrieve artifact
+    pub fn get_artifact(&self, hash: &str) -> Result<Vec<u8>> {
+        let prefix = &hash[..2];
+        let artifact_path = self.base_path
+            .join("artifacts")
+            .join(prefix)
+            .join(format!("{}.zst", hash));
+
+        if !artifact_path.exists() {
+            return Err(anyhow!("Artifact {} not found", hash));
+        }
+
+        let compressed = fs::read(&artifact_path)?;
+        let data = zstd::decode_all(&compressed[..])?;
+        
+        Ok(data)
+    }
+
+    /// Load events from storage
+    pub fn load_events(&self, limit: Option<usize>) -> Result<Vec<Event>> {
+        let mut stmt = self.db.prepare(
+            "SELECT event_id, ts, kind, span_id, parent_span_id, actor, 
+                    payload, artifact_refs, hash_prev, hash_self
+             FROM events ORDER BY event_id"
+        )?;
+
+        let limit = limit.unwrap_or(usize::MAX);
+        let events = stmt.query_map([], |row| {
+            let event_id: i64 = row.get(0)?;
+            let ts_str: String = row.get(1)?;
+            let kind_str: String = row.get(2)?;
+            let span_id: Option<String> = row.get(3)?;
+            let parent_span_id: Option<String> = row.get(4)?;
+            let actor: Option<String> = row.get(5)?;
+            let payload_str: String = row.get(6)?;
+            let artifact_refs_str: String = row.get(7)?;
+            let hash_prev: Option<String> = row.get(8)?;
+            let hash_self: String = row.get(9)?;
+
+            let ts = DateTime::parse_from_rfc3339(&ts_str)
+                .unwrap_or_else(|_| Utc::now().into())
+                .with_timezone(&Utc);
+            
+            let kind = match kind_str.as_str() {
+                "RUN_START" => EventKind::RunStart,
+                "RUN_END" => EventKind::RunEnd,
+                "AGENT_EVENT" => EventKind::AgentEvent,
+                "TOOL_CALL" => EventKind::ToolCall,
+                "TOOL_RESULT" => EventKind::ToolResult,
+                "OUTPUT_CHUNK" => EventKind::OutputChunk,
+                "PRESENCE" => EventKind::Presence,
+                "TICK" => EventKind::Tick,
+                "SHUTDOWN" => EventKind::Shutdown,
+                _ => EventKind::Custom,
+            };
+
+            let payload: serde_json::Value = serde_json::from_str(&payload_str).unwrap_or_default();
+            let artifact_refs: Vec<String> = serde_json::from_str(&artifact_refs_str).unwrap_or_default();
+
+            Ok(Event {
+                run_id: self.run_id.clone(),
+                event_id: EventId(event_id as u64),
+                ts,
+                kind,
+                span_id,
+                parent_span_id,
+                actor,
+                payload,
+                artifact_refs,
+                hash_prev,
+                hash_self,
+            })
+        })?
+        .take(limit)
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    /// Verify hash chain integrity
+    pub fn verify_chain(&self) -> Result<bool> {
+        let events = self.load_events(None)?;
+        
+        if events.is_empty() {
+            return Ok(true);
+        }
+
+        for (i, event) in events.iter().enumerate() {
+            // Verify event's own hash
+            if !event.verify() {
+                warn!("Event {} failed hash verification", event.event_id.0);
+                return Ok(false);
+            }
+
+            // Verify chain linkage (except first event)
+            if i > 0 {
+                let prev_hash = &events[i - 1].hash_self;
+                if event.hash_prev.as_ref() != Some(prev_hash) {
+                    warn!("Event {} has broken chain link", event.event_id.0);
+                    return Ok(false);
+                }
+            }
+        }
+
+        info!("Hash chain verified for {} events", events.len());
+        Ok(true)
+    }
+
+    /// Get root hash (hash of last event)
+    pub fn root_hash(&self) -> Option<String> {
+        self.last_hash.clone()
+    }
+
+    /// Get event count
+    pub fn event_count(&self) -> u64 {
+        self.event_count
+    }
+
+    /// Finalize run and write meta.json
+    pub fn finalize(&mut self, meta: &RunMeta) -> Result<()> {
+        self.flush()?;
+        
+        let meta_path = self.base_path.join("meta.json");
+        let meta_json = serde_json::to_string_pretty(meta)?;
+        fs::write(&meta_path, meta_json)?;
+        
+        info!("Finalized run {} at {:?}", self.run_id.0, meta_path);
+        
+        Ok(())
+    }
+
+    pub fn run_path(&self) -> &Path {
+        &self.base_path
+    }
+}
+
+/// List all recorded runs in a directory
+pub fn list_runs(base_path: &Path) -> Result<Vec<(RunId, RunMeta)>> {
+    let runs_dir = base_path.join("runs");
+    if !runs_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut runs = Vec::new();
+    
+    for entry in fs::read_dir(&runs_dir)? {
+        let entry = entry?;
+        let meta_path = entry.path().join("meta.json");
+        
+        if meta_path.exists() {
+            let meta_json = fs::read_to_string(&meta_path)?;
+            if let Ok(meta) = serde_json::from_str::<RunMeta>(&meta_json) {
+                runs.push((meta.run_id.clone(), meta));
+            }
+        }
+    }
+
+    // Sort by start time descending
+    runs.sort_by(|a, b| b.1.started_at.cmp(&a.1.started_at));
+    
+    Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_storage_lifecycle() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        
+        // Create storage
+        let mut storage = RunStorage::new(run_id.clone(), temp_dir.path(), 10).unwrap();
+        
+        // Store artifact
+        let data = b"test artifact data";
+        let hash = storage.store_artifact(data).unwrap();
+        assert!(!hash.is_empty());
+        
+        // Retrieve artifact
+        let retrieved = storage.get_artifact(&hash).unwrap();
+        assert_eq!(retrieved, data);
+        
+        // Finalize
+        let meta = RunMeta::new(run_id.clone(), "ws://test".to_string());
+        storage.finalize(&meta).unwrap();
+        
+        // Re-open and verify
+        let storage2 = RunStorage::open(run_id, temp_dir.path()).unwrap();
+        assert_eq!(storage2.event_count(), 0);
+    }
+}

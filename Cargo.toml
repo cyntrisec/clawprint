@@ -1,0 +1,56 @@
+[package]
+name = "clawprint"
+version = "0.1.0"
+edition = "2021"
+description = "Flight recorder and receipts tool for OpenClaw agent runs"
+authors = ["Boris <boris@example.com>"]
+license = "MIT"
+repository = "https://github.com/tsyrulb/clawprint"
+
+[lib]
+name = "clawprint"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clawprint"
+path = "src/main.rs"
+
+[[example]]
+name = "explore_gateway"
+path = "examples/explore_gateway.rs"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+clap = { version = "4.4", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3.9"
+axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["fs"], optional = true }
+futures = "0.3"
+url = "2.5"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+regex = "1.10"
+open = "5.0"
+lazy_static = "1.4"
+
+# Storage
+rusqlite = { version = "0.30", features = ["bundled", "chrono", "uuid"] }
+zstd = "0.13"
+walkdir = "2.4"
+
+[features]
+default = ["viewer"]
+viewer = ["axum", "tower-http"]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
