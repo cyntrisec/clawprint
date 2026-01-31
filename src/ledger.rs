@@ -251,7 +251,13 @@ impl Ledger {
     }
 
     /// Timestamp of the last event, or None if ledger is empty.
+    /// Checks the in-memory batch buffer first, then falls back to the DB.
     pub fn last_event_time(&self) -> Result<Option<DateTime<Utc>>> {
+        // Check unflushed buffer first
+        if let Some(last) = self.batch_buffer.last() {
+            return Ok(Some(last.ts));
+        }
+
         let ts: Option<String> = self.db
             .query_row(
                 "SELECT ts FROM events ORDER BY event_id DESC LIMIT 1",
@@ -559,6 +565,7 @@ impl Ledger {
 
     /// Verify hash chain integrity.
     /// Returns (is_valid, event_count_checked).
+    /// Streams events one at a time to avoid loading entire ledger into memory.
     pub fn verify_chain(&self) -> Result<(bool, u64)> {
         let mut stmt = self.db.prepare(
             "SELECT event_id, run_id, ts, kind, agent_run, span_id, parent_span_id, actor,
@@ -566,30 +573,32 @@ impl Ledger {
              FROM events ORDER BY event_id"
         )?;
 
-        let events = stmt.query_map([], |row| row_to_event(row))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut rows = stmt.query([])?;
+        let mut count: u64 = 0;
+        let mut prev_hash: Option<String> = None;
 
-        let count = events.len() as u64;
+        while let Some(row) = rows.next()? {
+            let event = row_to_event(row)?;
+            count += 1;
 
-        if events.is_empty() {
-            return Ok((true, 0));
-        }
-
-        for (i, event) in events.iter().enumerate() {
             if !event.verify() {
                 warn!("Ledger event {} failed hash verification", event.event_id.0);
                 return Ok((false, count));
             }
-            if i > 0 {
-                let prev_hash = &events[i - 1].hash_self;
-                if event.hash_prev.as_ref() != Some(prev_hash) {
+
+            if let Some(ref expected_prev) = prev_hash {
+                if event.hash_prev.as_ref() != Some(expected_prev) {
                     warn!("Ledger event {} has broken chain link", event.event_id.0);
                     return Ok((false, count));
                 }
             }
+
+            prev_hash = Some(event.hash_self);
         }
 
-        info!("Ledger hash chain verified for {} events", count);
+        if count > 0 {
+            info!("Ledger hash chain verified for {} events", count);
+        }
         Ok((true, count))
     }
 

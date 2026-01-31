@@ -6,8 +6,9 @@
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
@@ -49,15 +50,19 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
-    // Shutdown signal
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-    let shutdown_tx_signal = shutdown_tx.clone();
+    // Shutdown flag — survives across reconnect loop iterations
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
-        let _ = shutdown_tx_signal.send(()).await;
+        shutdown_clone.store(true, Ordering::SeqCst);
     });
 
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+
         match run_connection(
             &config.gateway_url,
             &auth_token,
@@ -65,60 +70,78 @@ pub async fn run_daemon(config: Config) -> Result<()> {
             config.flush_interval_ms,
             ledger.clone(),
             &pb,
-            &mut shutdown_rx,
+            &shutdown,
         ).await {
             Ok(ShutdownReason::Signal) => {
-                pb.finish_and_clear();
-                info!("Daemon shutting down gracefully");
-
-                let mut l = ledger.lock().await;
-                l.flush()?;
-                l.set_meta("daemon_stopped_at", &chrono::Utc::now().to_rfc3339())?;
-
-                let total = l.total_events();
-                let size = l.storage_size_bytes().unwrap_or(0);
-                eprintln!(
-                    "  Daemon stopped. {} events recorded, {} on disk.",
-                    total,
-                    format_bytes(size),
-                );
-                return Ok(());
+                break;
             }
             Ok(ShutdownReason::Disconnected) => {
+                // Connection was established then lost — reset backoff
+                backoff = Duration::from_secs(1);
                 warn!("Gateway disconnected, reconnecting in {:?}...", backoff);
                 pb.set_message(format!("Disconnected. Reconnecting in {}s...", backoff.as_secs()));
 
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = shutdown_rx.recv() => {
-                        pb.finish_and_clear();
-                        let mut l = ledger.lock().await;
-                        l.flush()?;
-                        return Ok(());
+                // Wait for backoff duration, but check shutdown periodically
+                let sleep_until = tokio::time::Instant::now() + backoff;
+                loop {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
                     }
+                    let remaining = sleep_until.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
                 }
 
-                // Exponential backoff
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // Exponential backoff (will reset on next successful connection)
                 backoff = (backoff * 2).min(max_backoff);
             }
             Err(e) => {
                 warn!("Connection error: {}. Reconnecting in {:?}...", e, backoff);
                 pb.set_message(format!("Error. Reconnecting in {}s...", backoff.as_secs()));
 
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = shutdown_rx.recv() => {
-                        pb.finish_and_clear();
-                        let mut l = ledger.lock().await;
-                        l.flush()?;
-                        return Ok(());
+                let sleep_until = tokio::time::Instant::now() + backoff;
+                loop {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
                     }
+                    let remaining = sleep_until.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
+                }
+
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
                 }
 
                 backoff = (backoff * 2).min(max_backoff);
             }
         }
     }
+
+    // Graceful shutdown: flush and record stop time
+    pb.finish_and_clear();
+    info!("Daemon shutting down gracefully");
+
+    let mut l = ledger.lock().await;
+    l.flush()?;
+    l.set_meta("daemon_stopped_at", &chrono::Utc::now().to_rfc3339())?;
+
+    let total = l.total_events();
+    let size = l.storage_size_bytes().unwrap_or(0);
+    eprintln!(
+        "  Daemon stopped. {} events recorded, {} on disk.",
+        total,
+        format_bytes(size),
+    );
+    Ok(())
 }
 
 enum ShutdownReason {
@@ -127,6 +150,7 @@ enum ShutdownReason {
 }
 
 /// Run a single gateway connection session, writing events to the ledger.
+/// Returns the shutdown reason so the caller can decide whether to reconnect.
 async fn run_connection(
     gateway_url: &str,
     auth_token: &str,
@@ -134,7 +158,7 @@ async fn run_connection(
     flush_interval_ms: u64,
     ledger: Arc<Mutex<Ledger>>,
     pb: &ProgressBar,
-    shutdown_rx: &mut mpsc::Receiver<()>,
+    shutdown: &Arc<AtomicBool>,
 ) -> Result<ShutdownReason> {
     let mut client = GatewayClient::new(gateway_url, auth_token)?;
     let conn_id = client.connect().await?;
@@ -142,9 +166,9 @@ async fn run_connection(
     info!("Daemon connected to gateway, connId: {}", conn_id);
     pb.set_message("Connected. Recording...");
 
-    // Spawn gateway event reader
-    let (event_tx, mut event_rx) = mpsc::channel::<GatewayEvent>(1000);
-    tokio::spawn(async move {
+    // Spawn gateway event reader, track the task handle
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<GatewayEvent>(1000);
+    let handle = tokio::spawn(async move {
         if let Err(e) = client.run(event_tx).await {
             error!("Gateway event loop ended: {}", e);
         }
@@ -152,8 +176,10 @@ async fn run_connection(
 
     let run_id = RunId("daemon".to_string());
     let mut flush_interval = interval(Duration::from_millis(flush_interval_ms));
+    // Poll shutdown flag every second
+    let mut shutdown_check = interval(Duration::from_secs(1));
 
-    loop {
+    let result = loop {
         tokio::select! {
             msg = event_rx.recv() => {
                 match msg {
@@ -192,7 +218,7 @@ async fn run_connection(
                         ));
                     }
                     None => {
-                        return Ok(ShutdownReason::Disconnected);
+                        break ShutdownReason::Disconnected;
                     }
                 }
             }
@@ -204,11 +230,18 @@ async fn run_connection(
                 }
             }
 
-            _ = shutdown_rx.recv() => {
-                return Ok(ShutdownReason::Signal);
+            _ = shutdown_check.tick() => {
+                if shutdown.load(Ordering::SeqCst) {
+                    break ShutdownReason::Signal;
+                }
             }
         }
-    }
+    };
+
+    // Abort the spawned gateway reader to avoid leaking tasks
+    handle.abort();
+
+    Ok(result)
 }
 
 fn format_bytes(bytes: u64) -> String {
