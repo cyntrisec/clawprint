@@ -3,7 +3,7 @@ name = "clawprint"
 version = "0.1.0"
 edition = "2021"
 description = "Flight recorder and receipts tool for OpenClaw agent runs"
-authors = ["Boris <boris@example.com>"]
+authors = ["Clawprint Contributors"]
 license = "MIT"
 repository = "https://github.com/tsyrulb/clawprint"
 
