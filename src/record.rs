@@ -10,7 +10,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    gateway::{GatewayClient, GatewayMessage},
+    gateway::{GatewayClient, GatewayEvent},
     storage::RunStorage,
     redact::redact_json,
     Config, Event, EventId, EventKind, RunId, RunMeta,
@@ -34,7 +34,6 @@ impl RecordingSession {
 
         info!("Starting recording session: {}", run_id.0);
 
-        // Create storage
         let storage = RunStorage::new(
             run_id.clone(),
             &config.output_dir,
@@ -44,11 +43,10 @@ impl RecordingSession {
         let storage = Arc::new(Mutex::new(storage));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        // Spawn recording task
         let config_clone = config.clone();
         let run_id_clone = run_id.clone();
         let storage_clone = storage.clone();
-        
+
         tokio::spawn(async move {
             if let Err(e) = recording_loop(
                 run_id_clone,
@@ -68,7 +66,6 @@ impl RecordingSession {
         })
     }
 
-    /// Get the run ID
     pub fn run_id(&self) -> &RunId {
         &self.run_id
     }
@@ -76,17 +73,16 @@ impl RecordingSession {
     /// Stop the recording session gracefully
     pub async fn stop(self) -> Result<()> {
         info!("Stopping recording session: {}", self.run_id.0);
-        
-        // Signal shutdown
+
         let _ = self.shutdown_tx.send(()).await;
-        
-        // Give it a moment to flush
+
+        // Give the recording loop time to write RUN_END and flush
         tokio::time::sleep(Duration::from_millis(500)).await;
-        
+
         // Finalize storage
         let mut storage = self.storage.lock().await;
         let root_hash = storage.root_hash().unwrap_or_default();
-        
+
         let meta = RunMeta {
             run_id: self.run_id.clone(),
             started_at: storage.load_events(Some(1))?
@@ -99,11 +95,10 @@ impl RecordingSession {
             gateway_url: self.config.gateway_url.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
-        
+
         storage.finalize(&meta)?;
-        
+
         info!("Recording session finalized: {}", self.run_id.0);
-        
         Ok(())
     }
 }
@@ -115,11 +110,14 @@ async fn recording_loop(
     storage: Arc<Mutex<RunStorage>>,
     mut shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
+    let auth_token = config.auth_token.as_deref()
+        .ok_or_else(|| anyhow::anyhow!("No auth token provided. Use --token or set gateway.auth.token in ~/.openclaw/openclaw.json"))?;
+
     // Connect to gateway
-    let (mut client, mut gateway_rx) = GatewayClient::new(&config.gateway_url)?;
-    let session_id = client.connect().await?;
-    
-    info!("Recording loop started, session: {}", session_id);
+    let mut client = GatewayClient::new(&config.gateway_url, auth_token)?;
+    let conn_id = client.connect().await?;
+
+    info!("Recording loop started, connId: {}", conn_id);
 
     // Write RUN_START event
     let start_event = Event::new(
@@ -128,58 +126,66 @@ async fn recording_loop(
         EventKind::RunStart,
         serde_json::json!({
             "gateway_url": config.gateway_url,
-            "session_id": session_id,
+            "conn_id": conn_id,
         }),
         None,
     );
-    
+
     {
         let mut storage = storage.lock().await;
         storage.write_event(start_event)?;
     }
 
+    // Spawn the gateway event loop on a separate task
+    let (event_tx, mut event_rx) = mpsc::channel::<GatewayEvent>(1000);
+    tokio::spawn(async move {
+        if let Err(e) = client.run(event_tx).await {
+            error!("Gateway event loop ended: {}", e);
+        }
+    });
+
     let mut event_counter: u64 = 2;
     let mut flush_interval = interval(Duration::from_millis(config.flush_interval_ms));
+    let redact = config.redact_secrets;
 
     loop {
         tokio::select! {
-            // Incoming gateway messages
-            Some(msg) = gateway_rx.recv() => {
-                debug!("Received gateway message: {:?}", msg);
-                
-                let event = match gateway_message_to_event(
-                    &run_id,
-                    EventId(event_counter),
-                    msg,
-                    &storage,
-                ).await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        warn!("Failed to convert message: {}", e);
-                        continue;
-                    }
-                };
+            msg = event_rx.recv() => {
+                match msg {
+                    Some(gw_event) => {
+                        debug!("Gateway event: {} (seq={:?})", gw_event.event, gw_event.seq);
 
-                {
-                    let mut storage = storage.lock().await;
-                    if let Err(e) = storage.write_event(event) {
-                        error!("Failed to write event: {}", e);
+                        let event = gateway_event_to_event(
+                            &run_id,
+                            EventId(event_counter),
+                            gw_event,
+                            redact,
+                        );
+
+                        {
+                            let mut storage = storage.lock().await;
+                            if let Err(e) = storage.write_event(event) {
+                                error!("Failed to write event: {}", e);
+                            }
+                        }
+
+                        event_counter += 1;
+                    }
+                    None => {
+                        // Gateway channel closed — gateway disconnected
+                        warn!("Gateway connection lost");
+                        break;
                     }
                 }
-                
-                event_counter += 1;
             }
-            
-            // Periodic flush
+
             _ = flush_interval.tick() => {
                 let mut storage = storage.lock().await;
                 if let Err(e) = storage.flush() {
                     error!("Failed to flush: {}", e);
                 }
             }
-            
-            // Shutdown signal
+
             _ = shutdown_rx.recv() => {
                 info!("Received shutdown signal");
                 break;
@@ -193,12 +199,12 @@ async fn recording_loop(
         EventId(event_counter),
         EventKind::RunEnd,
         serde_json::json!({
-            "session_id": session_id,
+            "conn_id": conn_id,
             "total_events": event_counter,
         }),
-        None, // Will be set by storage
+        None, // hash_prev set by storage.write_event
     );
-    
+
     {
         let mut storage = storage.lock().await;
         storage.write_event(end_event)?;
@@ -206,108 +212,45 @@ async fn recording_loop(
     }
 
     info!("Recording loop ended, {} events captured", event_counter);
-    
     Ok(())
 }
 
-/// Convert gateway message to event
-async fn gateway_message_to_event(
+/// Map a gateway event to a clawprint Event.
+fn gateway_event_to_event(
     run_id: &RunId,
     event_id: EventId,
-    msg: GatewayMessage,
-    _storage: &Arc<Mutex<RunStorage>>,
-) -> Result<Option<Event>> {
-    let (kind, payload, span_id, actor) = match msg {
-        GatewayMessage::AgentEvent { run_id: msg_run_id, event } => {
-            // Filter events not from our tracked run (if specified)
-            (
-                EventKind::AgentEvent,
-                event,
-                None,
-                Some(msg_run_id),
-            )
-        }
-        GatewayMessage::ToolCall { run_id, tool, args, span_id } => {
-            let mut payload = serde_json::json!({
-                "tool": tool,
-                "args": args,
-            });
-            
-            // Redact secrets if configured
-            redact_json(&mut payload);
-            
-            (
-                EventKind::ToolCall,
-                payload,
-                Some(span_id),
-                Some(run_id),
-            )
-        }
-        GatewayMessage::ToolResult { run_id, span_id, mut result, duration_ms } => {
-            redact_json(&mut result);
-            
-            let payload = serde_json::json!({
-                "result": result,
-                "duration_ms": duration_ms,
-            });
-            
-            (
-                EventKind::ToolResult,
-                payload,
-                Some(span_id),
-                Some(run_id),
-            )
-        }
-        GatewayMessage::OutputChunk { run_id, content } => {
-            (
-                EventKind::OutputChunk,
-                serde_json::json!({"content": content}),
-                None,
-                Some(run_id),
-            )
-        }
-        GatewayMessage::Presence { timestamp } => {
-            (
-                EventKind::Presence,
-                serde_json::json!({"timestamp": timestamp}),
-                None,
-                None,
-            )
-        }
-        GatewayMessage::Tick { timestamp } => {
-            (
-                EventKind::Tick,
-                serde_json::json!({"timestamp": timestamp}),
-                None,
-                None,
-            )
-        }
-        GatewayMessage::Shutdown { reason } => {
-            (
-                EventKind::Shutdown,
-                serde_json::json!({"reason": reason}),
-                None,
-                None,
-            )
-        }
-        GatewayMessage::Ping | GatewayMessage::Pong => {
-            return Ok(None); // Skip ping/pong
-        }
-        _ => {
-            return Ok(None); // Skip other messages
-        }
+    gw: GatewayEvent,
+    redact: bool,
+) -> Event {
+    let kind = match gw.event.as_str() {
+        "agent" => EventKind::AgentEvent,
+        "chat" => EventKind::OutputChunk,
+        "tick" => EventKind::Tick,
+        "presence" => EventKind::Presence,
+        "shutdown" => EventKind::Shutdown,
+        _ => EventKind::Custom,
     };
+
+    let mut payload = serde_json::json!({
+        "gateway_event": gw.event,
+        "data": gw.payload,
+    });
+
+    if redact {
+        redact_json(&mut payload);
+    }
 
     let mut event = Event::new(
         run_id.clone(),
         event_id,
         kind,
         payload,
-        None, // hash_prev set by storage
+        None, // hash_prev set by storage.write_event
     );
-    
-    event.span_id = span_id;
-    event.actor = actor;
-    
-    Ok(Some(event))
+
+    if let Some(seq) = gw.seq {
+        event.span_id = Some(format!("seq:{}", seq));
+    }
+
+    event
 }

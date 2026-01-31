@@ -205,6 +205,8 @@ pub struct Config {
     pub redact_secrets: bool,
     /// Gateway WebSocket URL
     pub gateway_url: String,
+    /// Gateway auth token
+    pub auth_token: Option<String>,
     /// Batch size for SQLite commits
     pub batch_size: usize,
     /// Flush interval in milliseconds
@@ -217,6 +219,7 @@ impl Default for Config {
             output_dir: std::path::PathBuf::from("./clawprints"),
             redact_secrets: true,
             gateway_url: "ws://127.0.0.1:18789".to_string(),
+            auth_token: None,
             batch_size: 100,
             flush_interval_ms: 200,
         }

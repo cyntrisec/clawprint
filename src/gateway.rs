@@ -1,6 +1,7 @@
-//! Gateway WebSocket client for observing agent runs
+//! Gateway WebSocket client for observing OpenClaw agent runs
 //!
-//! Connects to OpenClaw Gateway control-plane bus and streams events.
+//! Implements OpenClaw Gateway protocol v3 (req/res/event frames)
+//! to passively observe bot activity.
 
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
@@ -13,228 +14,226 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsS
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-/// Challenge payload from gateway
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChallengePayload {
-    pub nonce: String,
-    pub ts: u64,
+// ---------------------------------------------------------------------------
+// Wire types — OpenClaw protocol v3
+// ---------------------------------------------------------------------------
+
+/// Outgoing request frame (client → gateway)
+#[derive(Debug, Clone, Serialize)]
+struct RequestFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str, // always "req"
+    id: String,
+    method: String,
+    params: serde_json::Value,
 }
 
-/// Gateway protocol message types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Incoming frame (gateway → client). Tagged on `"type"`.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
-#[serde(rename_all = "lowercase")]
-pub enum GatewayMessage {
-    /// Initial connect handshake
-    Connect {
-        role: String,
-        version: String,
+enum IncomingFrame {
+    /// Response to a request
+    #[serde(rename = "res")]
+    Response {
+        id: String,
+        ok: bool,
+        #[serde(default)]
+        payload: serde_json::Value,
+        #[serde(default)]
+        error: Option<ErrorPayload>,
     },
-    /// Connect challenge (requires auth response)
+    /// Server-pushed event
     #[serde(rename = "event")]
-    ConnectChallenge {
+    Event {
         event: String,
-        payload: ChallengePayload,
+        #[serde(default)]
+        payload: serde_json::Value,
+        #[serde(default)]
+        seq: Option<u64>,
     },
-    /// Auth response to challenge
-    Auth {
-        token: String,
-        nonce: String,
-    },
-    /// Connect acknowledgment
-    Connected {
-        session_id: String,
-    },
-    /// Subscribe to events
-    Subscribe {
-        channels: Vec<String>,
-    },
-    /// Agent event stream
-    AgentEvent {
-        run_id: String,
-        event: serde_json::Value,
-    },
-    /// Tool call started
-    ToolCall {
-        run_id: String,
-        tool: String,
-        args: serde_json::Value,
-        span_id: String,
-    },
-    /// Tool call completed
-    ToolResult {
-        run_id: String,
-        span_id: String,
-        result: serde_json::Value,
-        duration_ms: u64,
-    },
-    /// Output chunk (streaming)
-    OutputChunk {
-        run_id: String,
-        content: String,
-    },
-    /// Presence heartbeat
-    Presence {
-        timestamp: String,
-    },
-    /// Tick
-    Tick {
-        timestamp: String,
-    },
-    /// Gateway shutting down
-    Shutdown {
-        reason: String,
-    },
-    /// Error
-    Error {
-        code: String,
-        message: String,
-    },
-    /// Ping/Pong
-    Ping,
-    Pong,
 }
 
-/// Client for connecting to OpenClaw Gateway
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorPayload {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Public event type forwarded to the recorder
+// ---------------------------------------------------------------------------
+
+/// A gateway event forwarded to the recording layer.
+#[derive(Debug, Clone)]
+pub struct GatewayEvent {
+    /// Event name, e.g. "agent", "chat", "tick", "presence", "shutdown"
+    pub event: String,
+    /// Full payload JSON
+    pub payload: serde_json::Value,
+    /// Server sequence number (if provided)
+    pub seq: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+/// Client for connecting to an OpenClaw Gateway as a passive observer.
 pub struct GatewayClient {
     url: Url,
+    auth_token: String,
     ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    session_id: Option<String>,
+    conn_id: Option<String>,
 }
 
 impl GatewayClient {
-    /// Create a new gateway client (does not connect yet)
-    pub fn new(url: &str) -> Result<(Self, mpsc::Receiver<GatewayMessage>)> {
+    /// Create a new gateway client. Does not connect yet.
+    pub fn new(url: &str, auth_token: &str) -> Result<Self> {
         let url = Url::parse(url)?;
-        let (_out_tx, out_rx) = mpsc::channel::<GatewayMessage>(1000);
-        
-        Ok((Self {
+        Ok(Self {
             url,
+            auth_token: auth_token.to_string(),
             ws_stream: None,
-            session_id: None,
-        }, out_rx))
+            conn_id: None,
+        })
     }
 
-    /// Connect to gateway and perform handshake
+    /// Connect to gateway and perform the protocol-v3 handshake.
+    /// Returns the connection ID assigned by the server.
     pub async fn connect(&mut self) -> Result<String> {
         info!("Connecting to gateway at {}", self.url);
 
         let (ws_stream, _) = connect_async(&self.url).await?;
         self.ws_stream = Some(ws_stream);
 
-        // Send connect handshake
-        let connect_msg = GatewayMessage::Connect {
-            role: "observer".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+        // Step 1: receive connect.challenge event
+        let challenge = timeout(Duration::from_secs(10), self.recv_frame()).await
+            .map_err(|_| anyhow!("Handshake timeout waiting for connect.challenge"))??;
+
+        let nonce = match &challenge {
+            IncomingFrame::Event { event, payload, .. } if event == "connect.challenge" => {
+                let nonce = payload.get("nonce")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("connect.challenge missing nonce"))?;
+                info!("Received challenge, nonce: {}", nonce);
+                nonce.to_string()
+            }
+            other => return Err(anyhow!("Expected connect.challenge, got: {:?}", other)),
         };
-        self.send_message(connect_msg).await?;
 
-        // Wait for challenge or connected
-        let response = timeout(Duration::from_secs(5), self.receive_message()).await
-            .map_err(|_| anyhow!("Connection handshake timeout"))??;
-
-        match response {
-            GatewayMessage::ConnectChallenge { payload, .. } => {
-                info!("Received challenge, nonce: {}", payload.nonce);
-                // For MVP: accept any challenge without auth
-                // TODO: Implement proper auth response
-                
-                // Wait for connected
-                let response2 = timeout(Duration::from_secs(5), self.receive_message()).await
-                    .map_err(|_| anyhow!("Auth response timeout"))??;
-                
-                match response2 {
-                    GatewayMessage::Connected { session_id } => {
-                        info!("Connected to gateway, session_id: {}", session_id);
-                        self.session_id = Some(session_id.clone());
-                        
-                        // Subscribe to events
-                        self.send_message(GatewayMessage::Subscribe {
-                            channels: vec![
-                                "agent_events".to_string(),
-                                "tool_calls".to_string(),
-                                "outputs".to_string(),
-                            ],
-                        }).await?;
-                        
-                        Ok(session_id)
-                    }
-                    _ => Err(anyhow!("Unexpected response after challenge: {:?}", response2)),
+        // Step 2: send connect request with auth
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let connect_req = RequestFrame {
+            frame_type: "req",
+            id: req_id.clone(),
+            method: "connect".to_string(),
+            params: serde_json::json!({
+                "minProtocol": 3,
+                "maxProtocol": 3,
+                "client": {
+                    "id": "gateway-client",
+                    "displayName": "Clawprint Recorder",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "platform": std::env::consts::OS,
+                    "mode": "probe"
+                },
+                "role": "operator",
+                "auth": {
+                    "token": self.auth_token
                 }
+            }),
+        };
+        self.send_json(&connect_req).await?;
+
+        // Step 3: receive hello-ok response
+        let resp = timeout(Duration::from_secs(10), self.recv_frame()).await
+            .map_err(|_| anyhow!("Handshake timeout waiting for hello-ok"))??;
+
+        match resp {
+            IncomingFrame::Response { ok: true, payload, id, .. } => {
+                if id != req_id {
+                    warn!("Response id mismatch: expected {}, got {}", req_id, id);
+                }
+                let conn_id = payload
+                    .pointer("/server/connId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                info!("Connected to gateway, connId: {}", conn_id);
+                self.conn_id = Some(conn_id.clone());
+                Ok(conn_id)
             }
-            GatewayMessage::Connected { session_id } => {
-                info!("Connected to gateway, session_id: {}", session_id);
-                self.session_id = Some(session_id.clone());
-                
-                self.send_message(GatewayMessage::Subscribe {
-                    channels: vec![
-                        "agent_events".to_string(),
-                        "tool_calls".to_string(),
-                        "outputs".to_string(),
-                    ],
-                }).await?;
-                
-                Ok(session_id)
+            IncomingFrame::Response { ok: false, error, .. } => {
+                let msg = error
+                    .map(|e| format!("{}: {}", e.code, e.message))
+                    .unwrap_or_else(|| "unknown error".to_string());
+                Err(anyhow!("Gateway rejected connection: {}", msg))
             }
-            GatewayMessage::Error { code, message } => {
-                Err(anyhow!("Connection error: {} - {}", code, message))
-            }
-            _ => Err(anyhow!("Unexpected response during handshake: {:?}", response)),
+            other => Err(anyhow!("Unexpected frame during handshake: {:?}", other)),
         }
     }
 
-    /// Run the event loop, forwarding messages to channel
-    pub async fn run(&mut self, output_tx: mpsc::Sender<GatewayMessage>) -> Result<()> {
-        let mut ws_stream = self.ws_stream.take()
+    /// Run the event loop, forwarding gateway events into `tx`.
+    /// This consumes the WebSocket stream — call after `connect()`.
+    pub async fn run(mut self, tx: mpsc::Sender<GatewayEvent>) -> Result<()> {
+        let mut ws = self.ws_stream.take()
             .ok_or_else(|| anyhow!("Not connected"))?;
 
-        let mut ping_interval = interval(Duration::from_secs(30));
-        let mut consecutive_errors = 0;
+        let mut ping_interval = interval(Duration::from_secs(25));
+        let mut consecutive_errors: u32 = 0;
 
         loop {
             tokio::select! {
-                // Incoming WebSocket message
-                msg = ws_stream.next() => {
+                msg = ws.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            debug!("Received: {}", text);
                             consecutive_errors = 0;
-                            
-                            match serde_json::from_str::<GatewayMessage>(&text) {
-                                Ok(gateway_msg) => {
-                                    if let Err(e) = output_tx.send(gateway_msg).await {
-                                        error!("Failed to forward message: {}", e);
+                            debug!("Received: {}", text);
+
+                            match serde_json::from_str::<IncomingFrame>(&text) {
+                                Ok(IncomingFrame::Event { event, payload, seq }) => {
+                                    if tx.send(GatewayEvent { event, payload, seq }).await.is_err() {
+                                        info!("Receiver dropped, stopping gateway loop");
                                         break;
                                     }
                                 }
+                                Ok(IncomingFrame::Response { .. }) => {
+                                    // Responses to requests we didn't send; log and skip
+                                    debug!("Ignoring unsolicited response");
+                                }
                                 Err(e) => {
-                                    warn!("Failed to parse message: {} - raw: {}", e, text);
-                                    // Store raw message for later analysis
+                                    warn!("Failed to parse frame: {} — raw: {}", e, &text[..text.len().min(200)]);
                                 }
                             }
                         }
                         Some(Ok(Message::Ping(data))) => {
-                            ws_stream.send(Message::Pong(data)).await?;
+                            ws.send(Message::Pong(data)).await?;
                         }
                         Some(Ok(Message::Close(_))) => {
-                            info!("Connection closed by gateway");
+                            info!("Gateway closed the connection");
                             break;
                         }
                         Some(Err(e)) => {
                             error!("WebSocket error: {}", e);
                             consecutive_errors += 1;
                             if consecutive_errors > 5 {
-                                return Err(anyhow!("Too many consecutive errors"));
+                                return Err(anyhow!("Too many consecutive WebSocket errors"));
                             }
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
-                        _ => {}
+                        None => {
+                            info!("WebSocket stream ended");
+                            break;
+                        }
+                        _ => {} // Binary, Pong, Frame — ignore
                     }
                 }
-                
-                // Periodic ping
+
                 _ = ping_interval.tick() => {
-                    if let Err(e) = ws_stream.send(Message::Ping(vec![])).await {
+                    if let Err(e) = ws.send(Message::Ping(vec![])).await {
                         error!("Failed to send ping: {}", e);
                         break;
                     }
@@ -245,8 +244,15 @@ impl GatewayClient {
         Ok(())
     }
 
-    async fn send_message(&mut self, msg: GatewayMessage) -> Result<()> {
-        let text = serde_json::to_string(&msg)?;
+    pub fn conn_id(&self) -> Option<&str> {
+        self.conn_id.as_deref()
+    }
+
+    // -- internal helpers --
+
+    async fn send_json<T: Serialize>(&mut self, msg: &T) -> Result<()> {
+        let text = serde_json::to_string(msg)?;
+        debug!("Sending: {}", text);
         if let Some(ref mut ws) = self.ws_stream {
             ws.send(Message::Text(text)).await?;
             Ok(())
@@ -255,15 +261,19 @@ impl GatewayClient {
         }
     }
 
-    async fn receive_message(&mut self) -> Result<GatewayMessage> {
+    async fn recv_frame(&mut self) -> Result<IncomingFrame> {
         if let Some(ref mut ws) = self.ws_stream {
             while let Some(msg) = ws.next().await {
                 match msg? {
                     Message::Text(text) => {
+                        debug!("Received: {}", text);
                         return Ok(serde_json::from_str(&text)?);
                     }
                     Message::Ping(data) => {
                         ws.send(Message::Pong(data)).await?;
+                    }
+                    Message::Close(_) => {
+                        return Err(anyhow!("Connection closed during handshake"));
                     }
                     _ => {}
                 }
@@ -273,24 +283,82 @@ impl GatewayClient {
             Err(anyhow!("Not connected"))
         }
     }
-
-    pub fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
-    }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_message_serialization() {
-        let msg = GatewayMessage::Connect {
-            role: "observer".to_string(),
-            version: "0.1.0".to_string(),
+    fn test_request_frame_serialization() {
+        let req = RequestFrame {
+            frame_type: "req",
+            id: "abc-123".to_string(),
+            method: "connect".to_string(),
+            params: serde_json::json!({"minProtocol": 3}),
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"connect\""));
-        assert!(json.contains("observer"));
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""type":"req""#));
+        assert!(json.contains(r#""method":"connect""#));
+        assert!(json.contains(r#""minProtocol":3"#));
+    }
+
+    #[test]
+    fn test_parse_event_frame() {
+        let json = r#"{"type":"event","event":"tick","payload":{"ts":1706596040000},"seq":1}"#;
+        let frame: IncomingFrame = serde_json::from_str(json).unwrap();
+        match frame {
+            IncomingFrame::Event { event, payload, seq } => {
+                assert_eq!(event, "tick");
+                assert_eq!(payload["ts"], 1706596040000u64);
+                assert_eq!(seq, Some(1));
+            }
+            _ => panic!("Expected Event frame"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_ok() {
+        let json = r#"{"type":"res","id":"abc","ok":true,"payload":{"type":"hello-ok","server":{"connId":"conn-1"}}}"#;
+        let frame: IncomingFrame = serde_json::from_str(json).unwrap();
+        match frame {
+            IncomingFrame::Response { ok, payload, .. } => {
+                assert!(ok);
+                assert_eq!(payload.pointer("/server/connId").unwrap(), "conn-1");
+            }
+            _ => panic!("Expected Response frame"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_error() {
+        let json = r#"{"type":"res","id":"abc","ok":false,"error":{"code":"INVALID_REQUEST","message":"unauthorized","retryable":false}}"#;
+        let frame: IncomingFrame = serde_json::from_str(json).unwrap();
+        match frame {
+            IncomingFrame::Response { ok, error, .. } => {
+                assert!(!ok);
+                let err = error.unwrap();
+                assert_eq!(err.code, "INVALID_REQUEST");
+                assert_eq!(err.message, "unauthorized");
+            }
+            _ => panic!("Expected Response frame"),
+        }
+    }
+
+    #[test]
+    fn test_parse_challenge_event() {
+        let json = r#"{"type":"event","event":"connect.challenge","payload":{"nonce":"abc-nonce","ts":1706596010000}}"#;
+        let frame: IncomingFrame = serde_json::from_str(json).unwrap();
+        match frame {
+            IncomingFrame::Event { event, payload, .. } => {
+                assert_eq!(event, "connect.challenge");
+                assert_eq!(payload["nonce"], "abc-nonce");
+            }
+            _ => panic!("Expected Event frame"),
+        }
     }
 }

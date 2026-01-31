@@ -41,6 +41,9 @@ enum Commands {
         /// Run name/ID (auto-generated if not specified)
         #[arg(long)]
         run_name: Option<String>,
+        /// Gateway auth token (auto-discovered from ~/.openclaw/openclaw.json if omitted)
+        #[arg(short, long)]
+        token: Option<String>,
         /// Disable secret redaction
         #[arg(long)]
         no_redact: bool,
@@ -107,9 +110,19 @@ enum Commands {
     },
 }
 
+/// Try to read the gateway auth token from ~/.openclaw/openclaw.json
+fn discover_openclaw_token() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let config_path = PathBuf::from(home).join(".openclaw").join("openclaw.json");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    config.pointer("/gateway/auth/token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
@@ -124,13 +137,35 @@ async fn main() -> Result<()> {
             gateway,
             out,
             run_name,
+            token,
             no_redact,
             batch_size,
         } => {
+            // Resolve auth token: CLI flag > auto-discovery
+            let auth_token = match token {
+                Some(t) => {
+                    info!("Using token from --token flag");
+                    Some(t)
+                }
+                None => {
+                    match discover_openclaw_token() {
+                        Some(t) => {
+                            info!("Auto-discovered token from ~/.openclaw/openclaw.json");
+                            Some(t)
+                        }
+                        None => {
+                            warn!("No auth token found. Pass --token or configure gateway.auth.token in ~/.openclaw/openclaw.json");
+                            None
+                        }
+                    }
+                }
+            };
+
             let config = Config {
                 output_dir: out,
                 redact_secrets: !no_redact,
                 gateway_url: gateway,
+                auth_token,
                 batch_size,
                 flush_interval_ms: 200,
             };
@@ -146,7 +181,6 @@ async fn main() -> Result<()> {
             info!("Recording started: {}", run_id.0);
             info!("Press Ctrl+C to stop recording...");
 
-            // Wait for Ctrl+C
             tokio::signal::ctrl_c().await?;
 
             info!("\nStopping recording...");
@@ -192,7 +226,6 @@ async fn main() -> Result<()> {
             info!("Open http://127.0.0.1:{}/view/{} in your browser", port, run_id.0);
 
             if open {
-                // Try to open browser
                 let url = format!("http://127.0.0.1:{}/view/{}", port, run_id.0);
                 let _ = open::that(&url);
             }
@@ -218,34 +251,34 @@ async fn main() -> Result<()> {
         Commands::Diff { run_a, run_b, out } => {
             let run_a = RunId(run_a);
             let run_b = RunId(run_b);
-            
+
             info!("Comparing runs: {} vs {}", run_a.0, run_b.0);
-            
+
             let diff = diff_runs(&run_a, &run_b, &out)?;
             println!("{}", diff);
         }
 
         Commands::Verify { run, out } => {
             let run_id = RunId(run);
-            
+
             use clawprint::storage::RunStorage;
             let storage = RunStorage::open(run_id.clone(), &out)?;
-            
+
             print!("Verifying hash chain for {}... ", run_id.0);
-            
+
             match storage.verify_chain() {
                 Ok(true) => {
-                    println!("✓ VALID");
+                    println!("VALID");
                     println!("Events: {}", storage.event_count());
                     println!("Root hash: {}", storage.root_hash().unwrap_or_default());
                 }
                 Ok(false) => {
-                    println!("✗ TAMPERED");
+                    println!("TAMPERED");
                     warn!("Hash chain verification failed - run may have been modified");
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    println!("✗ ERROR: {}", e);
+                    println!("ERROR: {}", e);
                     std::process::exit(1);
                 }
             }
