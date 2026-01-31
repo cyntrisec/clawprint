@@ -10,7 +10,9 @@ Clawprint is an audit, replay, and diff system for AI agent systems. It records 
 
 ## Features
 
-- **Out-of-process observer** — Connects to OpenClaw Gateway WebSocket without modifying core code
+- **24/7 daemon mode** — Continuous recording to a single ledger, auto-reconnect on disconnect
+- **MCP server** — Claude Desktop integration for querying agent activity via natural language
+- **Security scanner** — Detect destructive operations, prompt injection, privilege escalation, and anomalies
 - **Tamper-evident ledger** — SHA-256 hash chain for every event with integrity verification
 - **Secret redaction** — Automatic redaction of API keys, tokens, JWTs, AWS keys, GitHub PATs, and credentials
 - **Offline replay** — Reconstruct agent runs with event breakdowns, agent run sections, and chat reconstruction
@@ -23,44 +25,133 @@ Clawprint is an audit, replay, and diff system for AI agent systems. It records 
 
 ```bash
 # Install
+curl -fsSL https://raw.githubusercontent.com/tsyrulb/clawprint/master/install.sh | bash
+
+# Or build from source
 cargo install --path .
 
-# Start recording (auto-discovers token from ~/.openclaw/openclaw.json)
+# Start 24/7 daemon (recommended for always-on agents)
+clawprint daemon --gateway ws://127.0.0.1:18789 --out ./clawprints
+
+# Or record a single session
 clawprint record --gateway ws://127.0.0.1:18789 --out ./clawprints
 
-# List recorded runs
-clawprint list --out ./clawprints
+# Open the latest recording in browser
+clawprint open --out ./clawprints
 
-# View in browser (cybersecurity dashboard)
-clawprint view --run <run_id> --out ./clawprints --open
-
-# Replay offline with rich transcript
-clawprint replay --run <run_id> --out ./clawprints --offline
-
-# Export transcript to file
-clawprint replay --run <run_id> --out ./clawprints --offline --export transcript.md
-
-# Verify hash chain integrity
-clawprint verify --run <run_id> --out ./clawprints
-
-# Show run statistics
-clawprint stats --run <run_id> --out ./clawprints
-
-# Compare two runs
-clawprint diff --run-a <run_id_1> --run-b <run_id_2> --out ./clawprints
+# Start MCP server for Claude Desktop
+clawprint mcp --out ./clawprints
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `record` | Connect to gateway and record events in real-time with live progress spinner |
+| `daemon` | 24/7 continuous recording to a single ledger with auto-reconnect |
+| `record` | Record a single session with post-recording summary |
+| `mcp` | Start MCP server for Claude Desktop integration |
+| `open` | Open the latest (or specific) recording in the web dashboard |
 | `list` | List all recorded runs with duration, event count, and storage size |
-| `view` | Launch web dashboard for browsing events interactively |
+| `view` | Launch web dashboard for a specific run |
 | `replay` | Reconstruct a run offline with agent run sections and chat output |
 | `stats` | Show event type histogram, events-per-minute timeline, and agent run count |
 | `verify` | Verify SHA-256 hash chain integrity for a recorded run |
 | `diff` | Compare two runs with event kind breakdown |
+
+## Daemon Mode (24/7 Recording)
+
+For always-on agents like OpenClaw, use daemon mode. It records to a single continuous ledger and auto-reconnects on disconnect:
+
+```bash
+clawprint daemon --gateway ws://127.0.0.1:18789 --out ./clawprints
+```
+
+The daemon:
+- Writes to a single `ledger.sqlite` that grows forever
+- Automatically groups events into agent conversation runs
+- Reconnects with exponential backoff (1s, 2s, 4s... up to 60s)
+- Shuts down gracefully on Ctrl+C / SIGTERM
+
+### As a systemd service
+
+```ini
+# /etc/systemd/system/clawprint.service
+[Unit]
+Description=Clawprint Flight Recorder
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/clawprint daemon --gateway ws://127.0.0.1:18789 --out /var/lib/clawprints
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now clawprint
+```
+
+## MCP Server (Claude Desktop Integration)
+
+Clawprint includes an MCP (Model Context Protocol) server so you can query agent activity directly from Claude Desktop using natural language.
+
+### Setup
+
+Add to your Claude Desktop config (`~/.claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "clawprint": {
+      "command": "clawprint",
+      "args": ["mcp", "--out", "/path/to/clawprints"]
+    }
+  }
+}
+```
+
+### Available tools
+
+Once connected, Claude can use these tools:
+
+| Tool | What it does |
+|------|-------------|
+| `clawprint_status` | Recording status, total events, ledger size, integrity |
+| `clawprint_list_runs` | List agent conversation runs with duration and tool call count |
+| `clawprint_get_run` | Full transcript of an agent run (use `run_id='latest'`) |
+| `clawprint_search` | Search event payloads across all history |
+| `clawprint_tool_calls` | List tool calls with filtering by run, time, or tool name |
+| `clawprint_security_check` | Scan for destructive ops, prompt injection, privilege escalation |
+| `clawprint_verify` | Verify hash chain integrity |
+| `clawprint_stats` | Event statistics, breakdown by type, timeline |
+
+### Example queries
+
+Ask Claude things like:
+- "What did my agent do in the last hour?"
+- "Show me all tool calls from today"
+- "Run a security check on the latest agent run"
+- "Search for any file deletions"
+- "Is the recording ledger intact?"
+
+## Security Auditing
+
+The built-in security scanner detects suspicious patterns in recorded events:
+
+| Category | What it detects |
+|----------|----------------|
+| Destructive Operations | `rm -rf`, `DROP TABLE`, `DELETE FROM`, `git push --force`, `git reset --hard` |
+| Prompt Injection | "ignore previous instructions", role switching, obfuscated base64 payloads |
+| Privilege Escalation | `sudo`, `chmod 777`, writes to `/etc/`, `/root/` |
+| External Access | `curl`/`wget` in tool calls, HTTP URLs in tool arguments |
+| Cost Anomaly | >50 tool calls per agent run, >100 events per minute |
+
+Use via MCP: ask Claude "run a security check on today's activity"
+
+Or programmatically via the `clawprint::security::scan_events()` API.
 
 ## Web Dashboard
 
@@ -91,6 +182,7 @@ clawprints/
       artifacts/          # Compressed blobs (zstd)
         <hash_prefix>/<hash>.zst
       meta.json           # Run metadata + root hash
+  ledger.sqlite           # Continuous ledger (daemon mode)
 ```
 
 ### SQLite Schema
@@ -114,9 +206,10 @@ Events are stored with sequential IDs, timestamps, event kind, JSON payload, spa
 ```
                                                         Storage
  OpenClaw       WebSocket        Clawprint             (SQLite + zstd)
- Gateway  <------------------>  Recorder  ---------->  ledger.sqlite
-           (observer role)         |                   artifacts/
-                                   |                   meta.json
+ Gateway  <------------------>  Daemon/Recorder  --->  ledger.sqlite
+           (observer role)         |
+                                   |--- MCP Server ---> Claude Desktop
+                                   |
                                    v
                               Web Viewer  <---  Browser
                               (Axum HTTP)       (Dashboard UI)
@@ -128,7 +221,11 @@ Events are stored with sequential IDs, timestamps, event kind, JSON payload, spa
 |--------|------|
 | `gateway` | WebSocket client for OpenClaw Gateway protocol v3 (req/res/event frames) |
 | `record` | Recording session coordinator with live progress spinner |
-| `storage` | SQLite ledger with hash chain, artifact store, filtered queries |
+| `daemon` | 24/7 continuous recording with auto-reconnect |
+| `ledger` | Single continuous SQLite ledger with agent run grouping |
+| `mcp` | MCP server for Claude Desktop integration (8 tools) |
+| `security` | Security scanner for detecting suspicious patterns |
+| `storage` | Per-session SQLite ledger with hash chain, artifact store, filtered queries |
 | `replay` | Offline replay with agent run grouping and chat reconstruction |
 | `viewer` | Axum web server with dashboard UI and REST API |
 | `redact` | Secret detection and redaction (regex-based, supports JWT/AWS/GitHub patterns) |
@@ -184,7 +281,7 @@ cargo build --release
 # Run tests
 cargo test
 
-# Without web viewer feature
+# Without web viewer or MCP features
 cargo build --no-default-features
 ```
 

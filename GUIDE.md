@@ -18,6 +18,9 @@ A step-by-step guide to installing, configuring, and using Clawprint to record, 
 - [Exporting Data](#exporting-data)
 - [Querying the REST API](#querying-the-rest-api)
 - [Secret Redaction](#secret-redaction)
+- [Daemon Mode (24/7 Recording)](#daemon-mode-247-recording)
+- [MCP Server (Claude Desktop)](#mcp-server-claude-desktop)
+- [Security Auditing](#security-auditing)
 - [Remote and Cloud Deployment](#remote-and-cloud-deployment)
 - [Troubleshooting](#troubleshooting)
 
@@ -272,44 +275,13 @@ clawprint record \
 
 ### Long-running recording
 
-For continuous monitoring, you can run Clawprint as a background service:
+For continuous monitoring of always-on agents, use **daemon mode** instead:
 
 ```bash
-# Run in background with nohup
-nohup ./target/release/clawprint record \
-  --gateway ws://127.0.0.1:18789 \
-  --out /var/log/clawprints \
-  > /var/log/clawprint-recorder.log 2>&1 &
-
-# Check it's running
-jobs -l
-
-# Stop it later
-kill %1
+clawprint daemon --gateway ws://127.0.0.1:18789 --out ./clawprints
 ```
 
-Or create a systemd service:
-
-```ini
-# /etc/systemd/system/clawprint-recorder.service
-[Unit]
-Description=Clawprint Recorder
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/clawprint record --gateway ws://127.0.0.1:18789 --out /var/log/clawprints
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable --now clawprint-recorder
-sudo journalctl -u clawprint-recorder -f
-```
+Daemon mode writes to a single continuous ledger and auto-reconnects on disconnect. See the [Daemon Mode](#daemon-mode-247-recording) section for systemd setup and details.
 
 ---
 
@@ -675,6 +647,168 @@ clawprint record --no-redact
 ```
 
 This is not recommended for recordings that will be shared or stored long-term.
+
+---
+
+## Daemon Mode (24/7 Recording)
+
+If your OpenClaw agent runs 24/7, use daemon mode instead of `record`. The daemon writes to a single continuous ledger and automatically reconnects if the gateway disconnects.
+
+### Starting the daemon
+
+```bash
+clawprint daemon --gateway ws://127.0.0.1:18789 --out ./clawprints
+```
+
+The daemon:
+- Records to `./clawprints/ledger.sqlite` (one file, grows forever)
+- Automatically detects and groups agent conversation runs
+- Reconnects with exponential backoff (1s, 2s, 4s... up to 60s) on disconnect
+- Flushes buffered events on Ctrl+C / SIGTERM
+
+### Daemon vs Record
+
+| Feature | `daemon` | `record` |
+|---------|----------|----------|
+| Storage | Single continuous ledger | Per-session SQLite file |
+| Reconnect | Auto-reconnect on disconnect | Exits on disconnect |
+| Agent runs | Auto-grouped from events | One run per session |
+| Use case | 24/7 agents | One-off recordings |
+
+### Running as a systemd service
+
+```ini
+# /etc/systemd/system/clawprint.service
+[Unit]
+Description=Clawprint Flight Recorder
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/clawprint daemon \
+  --gateway ws://127.0.0.1:18789 \
+  --out /var/lib/clawprints
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now clawprint
+sudo journalctl -u clawprint -f
+```
+
+---
+
+## MCP Server (Claude Desktop)
+
+Clawprint includes an MCP (Model Context Protocol) server, so you can query agent activity directly from Claude Desktop using natural language.
+
+### Setup
+
+1. Make sure `clawprint` is in your PATH (or use the full path in the config)
+2. Make sure the daemon is running and writing to a ledger
+3. Add to your Claude Desktop config:
+
+**For Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or `~/.config/Claude/claude_desktop_config.json` on Linux):
+
+```json
+{
+  "mcpServers": {
+    "clawprint": {
+      "command": "clawprint",
+      "args": ["mcp", "--out", "/path/to/clawprints"]
+    }
+  }
+}
+```
+
+**For Claude Code** (`~/.claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "clawprint": {
+      "command": "clawprint",
+      "args": ["mcp", "--out", "/path/to/clawprints"]
+    }
+  }
+}
+```
+
+4. Restart Claude Desktop / Claude Code
+
+### Example queries
+
+Once connected, you can ask Claude natural-language questions about your agent activity:
+
+- **"What's the status of my Clawprint recorder?"** — calls `clawprint_status`
+- **"List the agent runs from today"** — calls `clawprint_list_runs` with `since: "today"`
+- **"Show me what the latest agent conversation did"** — calls `clawprint_get_run` with `run_id: "latest"`
+- **"Search for any database operations"** — calls `clawprint_search` with `query: "database"`
+- **"What tools did the agent use in the last 3 hours?"** — calls `clawprint_tool_calls` with `since: "3 hours ago"`
+- **"Run a security check on the latest run"** — calls `clawprint_security_check`
+- **"Is the recording ledger intact?"** — calls `clawprint_verify`
+- **"Show me event statistics for this week"** — calls `clawprint_stats`
+
+### Available MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `clawprint_status` | Recording status: total events, last event time, ledger size, integrity |
+| `clawprint_list_runs` | List agent conversation runs with duration, event count, tool call count |
+| `clawprint_get_run` | Full transcript of an agent run (tool calls + chat output). Use `run_id='latest'` |
+| `clawprint_search` | Full-text search across all event payloads. Supports time and kind filtering |
+| `clawprint_tool_calls` | List tool calls with filtering by run ID, time range, or tool name |
+| `clawprint_security_check` | Scan for destructive operations, prompt injection, privilege escalation, anomalies |
+| `clawprint_verify` | Verify SHA-256 hash chain integrity of the ledger |
+| `clawprint_stats` | Event statistics: breakdown by type, timeline, storage size |
+
+### Time filtering
+
+All time-aware tools accept natural language time values:
+
+- `"today"`, `"yesterday"`
+- `"3 hours ago"`, `"30 minutes ago"`, `"2 days ago"`
+- ISO 8601: `"2026-01-31T12:00:00Z"`
+- Date only: `"2026-01-31"`
+
+---
+
+## Security Auditing
+
+Clawprint includes a built-in security scanner that detects suspicious patterns in recorded events. This runs entirely offline against your local ledger data.
+
+### What it detects
+
+| Category | Patterns |
+|----------|----------|
+| **Destructive Operations** | `rm -rf`, `DROP TABLE`, `DELETE FROM`, `TRUNCATE`, `git push --force`, `git reset --hard`, `mkfs.` |
+| **Prompt Injection** | "ignore previous instructions", "you are now", "new instructions:", "system prompt:", large base64-encoded blocks |
+| **Privilege Escalation** | `sudo`, `chmod 777`, `chown root`, writes to `/etc/`, `/root/`, `/usr/` |
+| **External Access** | `curl`/`wget` in tool calls, HTTP/HTTPS URLs in tool arguments |
+| **Cost Anomaly** | More than 50 tool calls in a single agent run, more than 100 events per minute |
+
+### Using via MCP (recommended)
+
+Ask Claude: "Run a security check on the latest agent run" or "Scan for any suspicious activity today"
+
+### Using via Rust API
+
+```rust
+use clawprint::security::scan_events;
+
+let report = scan_events(&events);
+println!("{}", report.to_text());
+```
+
+### Severity levels
+
+Findings are ranked: **Critical** > **High** > **Medium** > **Low** > **Info**
+
+The security report shows findings sorted by severity with evidence excerpts from the original event payloads.
 
 ---
 

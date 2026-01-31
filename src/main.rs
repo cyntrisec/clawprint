@@ -174,6 +174,18 @@ enum Commands {
         #[arg(short, long, default_value = "./clawprints")]
         out: PathBuf,
     },
+    /// Open a recording in the web viewer (latest run if none specified)
+    Open {
+        /// Run ID to view (opens the most recent run if omitted)
+        #[arg(short, long)]
+        run: Option<String>,
+        /// Output directory
+        #[arg(short, long, default_value = "./clawprints")]
+        out: PathBuf,
+        /// Port for viewer server
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
     /// Run as a 24/7 daemon recording to a continuous ledger
     Daemon {
         /// Gateway WebSocket URL
@@ -306,9 +318,23 @@ async fn main() -> Result<()> {
             tokio::signal::ctrl_c().await?;
 
             info!("\nStopping recording...");
-            session.stop().await?;
+            let summary = session.stop().await?;
 
-            info!("Recording saved: {}", run_id.0);
+            let id_short = &run_id.0[..8.min(run_id.0.len())];
+            let integrity = if summary.valid { "VALID" } else { "TAMPERED" };
+
+            cprintln!("\n  {} {}\n",
+                "Recording complete:".green().bold(),
+                id_short.bright_blue());
+            cprintln!("    Duration: {} | Events: {} | Size: {} | Integrity: {}",
+                format_duration(summary.duration_secs),
+                summary.event_count.to_string().cyan(),
+                format_bytes(summary.size_bytes).dimmed(),
+                if summary.valid { integrity.green().to_string() } else { integrity.red().to_string() },
+            );
+            cprintln!("\n    {}",  "Next steps:".dimmed());
+            cprintln!("      clawprint stats --run {} --out {:?}", id_short, summary.out_dir);
+            cprintln!("      clawprint open  --run {} --out {:?}\n", id_short, summary.out_dir);
         }
 
         Commands::List { out } => {
@@ -380,6 +406,36 @@ async fn main() -> Result<()> {
                 let _ = open::that(&url);
             }
 
+            start_viewer(out, port).await?;
+        }
+
+        Commands::Open { run, out, port } => {
+            let run_id = match run {
+                Some(r) => RunId(r),
+                None => {
+                    // Find the latest run by started_at
+                    let runs = list_runs_with_stats(&out)?;
+                    if runs.is_empty() {
+                        cprintln!("{}", "No recorded runs found.".yellow());
+                        return Ok(());
+                    }
+                    let (latest_id, _, _) = runs.into_iter()
+                        .max_by_key(|(_, meta, _)| meta.started_at)
+                        .unwrap();
+                    latest_id
+                }
+            };
+
+            let id_short = &run_id.0[..8.min(run_id.0.len())];
+            let url = format!("http://127.0.0.1:{}/view/{}", port, run_id.0);
+            cprintln!(
+                "\n  {} Opening run {}\n  {}\n",
+                "Clawprint".bright_cyan().bold(),
+                id_short.bright_blue(),
+                url.underline(),
+            );
+
+            let _ = open::that(&url);
             start_viewer(out, port).await?;
         }
 

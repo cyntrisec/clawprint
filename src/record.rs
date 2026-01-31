@@ -18,6 +18,15 @@ use crate::{
     Config, Event, EventId, EventKind, RunId, RunMeta,
 };
 
+/// Summary returned after a recording session ends.
+pub struct RecordingSummary {
+    pub duration_secs: i64,
+    pub event_count: u64,
+    pub size_bytes: u64,
+    pub valid: bool,
+    pub out_dir: std::path::PathBuf,
+}
+
 /// Active recording session
 pub struct RecordingSession {
     run_id: RunId,
@@ -72,8 +81,8 @@ impl RecordingSession {
         &self.run_id
     }
 
-    /// Stop the recording session gracefully
-    pub async fn stop(self) -> Result<()> {
+    /// Stop the recording session gracefully and return a summary.
+    pub async fn stop(self) -> Result<RecordingSummary> {
         info!("Stopping recording session: {}", self.run_id.0);
 
         let _ = self.shutdown_tx.send(()).await;
@@ -85,13 +94,16 @@ impl RecordingSession {
         let mut storage = self.storage.lock().await;
         let root_hash = storage.root_hash().unwrap_or_default();
 
+        let started_at = storage.load_events(Some(1))?
+            .first()
+            .map(|e| e.ts)
+            .unwrap_or_else(chrono::Utc::now);
+        let ended_at = chrono::Utc::now();
+
         let meta = RunMeta {
             run_id: self.run_id.clone(),
-            started_at: storage.load_events(Some(1))?
-                .first()
-                .map(|e| e.ts)
-                .unwrap_or_else(chrono::Utc::now),
-            ended_at: Some(chrono::Utc::now()),
+            started_at,
+            ended_at: Some(ended_at),
             event_count: storage.event_count(),
             root_hash,
             gateway_url: self.config.gateway_url.clone(),
@@ -100,8 +112,18 @@ impl RecordingSession {
 
         storage.finalize(&meta)?;
 
+        let valid = storage.verify_chain().unwrap_or(false);
+        let size_bytes = storage.storage_size_bytes().unwrap_or(0);
+        let duration_secs = ended_at.signed_duration_since(started_at).num_seconds();
+
         info!("Recording session finalized: {}", self.run_id.0);
-        Ok(())
+        Ok(RecordingSummary {
+            duration_secs,
+            event_count: meta.event_count,
+            size_bytes,
+            valid,
+            out_dir: self.config.output_dir.clone(),
+        })
     }
 }
 
