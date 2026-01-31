@@ -18,6 +18,7 @@ A step-by-step guide to installing, configuring, and using Clawprint to record, 
 - [Exporting Data](#exporting-data)
 - [Querying the REST API](#querying-the-rest-api)
 - [Secret Redaction](#secret-redaction)
+- [Remote and Cloud Deployment](#remote-and-cloud-deployment)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -674,6 +675,187 @@ clawprint record --no-redact
 ```
 
 This is not recommended for recordings that will be shared or stored long-term.
+
+---
+
+## Remote and Cloud Deployment
+
+Clawprint works anywhere OpenClaw runs. This section covers how to install and use Clawprint when OpenClaw is on a different machine — a cloud VPS, Mac Mini, home server, or any remote environment.
+
+### Architecture overview
+
+```
+┌─────────────────────────────┐        ┌─────────────────────────────┐
+│  Remote Server / Cloud VPS  │        │  Your Local Machine         │
+│                             │        │                             │
+│  openclaw gateway (:18789)  │◄──────►│  clawprint record           │
+│  openclaw agent             │  WS    │    --gateway ws://...       │
+│                             │        │    --out ./clawprints       │
+└─────────────────────────────┘        └─────────────────────────────┘
+```
+
+Clawprint connects to the OpenClaw gateway over WebSocket. As long as you can reach the gateway, Clawprint can record from anywhere — same machine, same LAN, or across the internet.
+
+### Option A: Run Clawprint on the same machine as OpenClaw
+
+The simplest setup. SSH into your server, install both tools there:
+
+```bash
+# On the remote server
+curl -fsSL https://openclaw.bot/install.sh | bash
+openclaw onboard --install-daemon
+openclaw gateway
+
+# Install Clawprint on the same machine
+git clone https://github.com/tsyrulb/clawprint.git
+cd clawprint && cargo build --release
+
+# Record locally — gateway is on localhost
+./target/release/clawprint record --out ./clawprints
+```
+
+To retrieve the recording data afterward:
+
+```bash
+# From your local machine, copy recordings via scp
+scp -r user@your-server:~/clawprint/clawprints ./clawprints-from-server
+
+# Or use rsync for incremental copies (useful for large recordings)
+rsync -avz user@your-server:~/clawprint/clawprints/ ./clawprints/
+```
+
+Then analyse locally:
+
+```bash
+clawprint list --out ./clawprints
+clawprint stats --run <run_id> --out ./clawprints
+clawprint view --run <run_id> --out ./clawprints --open
+```
+
+### Option B: Record remotely via SSH tunnel
+
+If you want to run Clawprint on your local machine but the gateway is on a remote server (bound to localhost only):
+
+```bash
+# Step 1: Open an SSH tunnel (runs in background)
+ssh -N -L 18789:127.0.0.1:18789 user@your-server &
+
+# Step 2: Record — Clawprint sees the gateway on localhost via the tunnel
+clawprint record --gateway ws://127.0.0.1:18789 --out ./clawprints
+```
+
+This is secure (traffic goes through SSH) and requires no gateway configuration changes.
+
+### Option C: Expose the gateway on LAN or public IP
+
+If you want Clawprint to connect directly without a tunnel:
+
+```bash
+# On the server — bind gateway to all interfaces
+openclaw gateway --bind 0.0.0.0
+
+# On your local machine
+clawprint record \
+  --gateway ws://192.168.1.100:18789 \
+  --token your-gateway-token \
+  --out ./clawprints
+```
+
+**Security note:** Always use `--token` when exposing the gateway beyond localhost. If the server is on the public internet, consider using a firewall to restrict port 18789 to known IPs, or use Tailscale (see below).
+
+### Option D: Tailscale / Tailnet
+
+If both machines are on a Tailscale network:
+
+```bash
+# On the server
+openclaw gateway --bind tailnet
+
+# On your local machine
+clawprint record \
+  --gateway ws://your-server.tail12345.ts.net:18789 \
+  --token your-gateway-token \
+  --out ./clawprints
+```
+
+Tailscale handles authentication and encryption, so this is secure without extra setup.
+
+### Option E: Cloud VPS (AWS, Hetzner, DigitalOcean, etc.)
+
+A typical cloud deployment:
+
+```bash
+# 1. SSH into your VPS
+ssh user@your-vps-ip
+
+# 2. Install OpenClaw
+curl -fsSL https://openclaw.bot/install.sh | bash
+openclaw onboard --install-daemon
+
+# 3. Install Rust (if not present) and build Clawprint
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+git clone https://github.com/tsyrulb/clawprint.git
+cd clawprint && cargo build --release
+
+# 4. Start gateway and recorder as background services
+openclaw gateway &
+./target/release/clawprint record --out ./clawprints &
+
+# 5. Use OpenClaw from any client (Telegram, web, CLI on another machine)
+# Clawprint records everything automatically
+```
+
+### Viewing recordings from a remote server
+
+If the recording data lives on the remote server and you want to use the web dashboard:
+
+```bash
+# Option 1: SSH tunnel for the viewer
+ssh -N -L 8080:127.0.0.1:8080 user@your-server &
+
+# On the server
+clawprint view --run <run_id> --out ./clawprints --port 8080
+
+# Open http://127.0.0.1:8080 in your local browser
+```
+
+```bash
+# Option 2: Copy data locally and view
+scp -r user@your-server:~/clawprint/clawprints/runs/<run_id> ./clawprints/runs/
+clawprint view --run <run_id> --out ./clawprints --open
+```
+
+```bash
+# Option 3: rsync for ongoing sync
+rsync -avz user@your-server:~/clawprint/clawprints/ ./clawprints/
+clawprint list --out ./clawprints
+```
+
+### Storage location on remote servers
+
+Recordings are regular files — a SQLite database and a `meta.json` per run:
+
+```
+./clawprints/runs/<run_id>/
+├── ledger.sqlite    # All events with hash chain
+└── meta.json        # Run metadata (timestamps, event count, root hash)
+```
+
+These are self-contained. You can copy a single run directory to any machine and use all Clawprint commands on it. No server connection needed for analysis — everything works offline.
+
+### Continuous monitoring setup
+
+For always-on recording on a server, use a systemd service (see [Long-running recording](#long-running-recording) above) or a simple screen/tmux session:
+
+```bash
+# Using tmux
+tmux new-session -d -s clawprint \
+  './target/release/clawprint record --out /var/log/clawprints'
+
+# Attach later to check status
+tmux attach -t clawprint
+```
 
 ---
 
