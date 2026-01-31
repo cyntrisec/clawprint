@@ -339,3 +339,32 @@ fn format_event_card(event: &Event) -> String {
 
 const ERROR_HTML: &str = r#"<!DOCTYPE html>
 <html><body><h1>Error loading runs</h1></body></html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_html() {
+        assert_eq!(escape_html("<script>alert(1)</script>"),
+                   "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(escape_html(r#"x="y""#), "x=&quot;y&quot;");
+        assert_eq!(escape_html("it's"), "it&#x27;s");
+        assert_eq!(escape_html("safe text"), "safe text");
+    }
+
+    #[test]
+    fn test_format_event_card_escapes_payload() {
+        let event = crate::Event::new(
+            crate::RunId("test-run".to_string()),
+            crate::EventId(1),
+            crate::EventKind::ToolCall,
+            serde_json::json!({"xss": "<img src=x onerror=alert(1)>"}),
+            None,
+        );
+        let html = format_event_card(&event);
+        assert!(!html.contains("<img"), "XSS payload must be escaped");
+        assert!(html.contains("&lt;img"), "XSS payload must be escaped to entities");
+    }
+}

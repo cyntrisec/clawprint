@@ -230,8 +230,7 @@ mod tests {
     #[test]
     fn test_event_hash_chain() {
         let run_id = RunId::new();
-        
-        // First event
+
         let event1 = Event::new(
             run_id.clone(),
             EventId(1),
@@ -241,8 +240,7 @@ mod tests {
         );
         assert!(event1.verify());
         assert!(event1.hash_prev.is_none());
-        
-        // Second event links to first
+
         let event2 = Event::new(
             run_id.clone(),
             EventId(2),
@@ -252,5 +250,117 @@ mod tests {
         );
         assert!(event2.verify());
         assert_eq!(event2.hash_prev, Some(event1.hash_self));
+    }
+
+    /// Hash must be deterministic: same inputs -> same hash
+    #[test]
+    fn test_hash_determinism() {
+        let run_id = RunId("fixed-id".to_string());
+        let event = Event::new(
+            run_id.clone(),
+            EventId(1),
+            EventKind::RunStart,
+            serde_json::json!({"key": "value"}),
+            None,
+        );
+
+        let hash1 = event.compute_hash();
+        let hash2 = event.compute_hash();
+        assert_eq!(hash1, hash2);
+    }
+
+    /// Different payloads must produce different hashes
+    #[test]
+    fn test_different_payloads_different_hashes() {
+        let run_id = RunId("fixed-id".to_string());
+        let ts = chrono::Utc::now();
+
+        let mut e1 = Event {
+            run_id: run_id.clone(),
+            event_id: EventId(1),
+            ts,
+            kind: EventKind::ToolCall,
+            span_id: None,
+            parent_span_id: None,
+            actor: None,
+            payload: serde_json::json!({"data": "aaa"}),
+            artifact_refs: vec![],
+            hash_prev: None,
+            hash_self: String::new(),
+        };
+        e1.hash_self = e1.compute_hash();
+
+        let mut e2 = Event {
+            run_id: run_id.clone(),
+            event_id: EventId(1),
+            ts,
+            kind: EventKind::ToolCall,
+            span_id: None,
+            parent_span_id: None,
+            actor: None,
+            payload: serde_json::json!({"data": "bbb"}),
+            artifact_refs: vec![],
+            hash_prev: None,
+            hash_self: String::new(),
+        };
+        e2.hash_self = e2.compute_hash();
+
+        assert_ne!(e1.hash_self, e2.hash_self);
+    }
+
+    /// Verify detects modification
+    #[test]
+    fn test_verify_detects_tamper() {
+        let run_id = RunId::new();
+        let mut event = Event::new(
+            run_id,
+            EventId(1),
+            EventKind::RunStart,
+            serde_json::json!({"ok": true}),
+            None,
+        );
+        assert!(event.verify());
+
+        // Tamper with payload
+        event.payload = serde_json::json!({"ok": false});
+        assert!(!event.verify(), "Tampered event should fail verification");
+    }
+
+    /// Hash output is always 64 hex characters (SHA-256)
+    #[test]
+    fn test_hash_format() {
+        let event = Event::new(
+            RunId::new(),
+            EventId(1),
+            EventKind::RunStart,
+            serde_json::json!(null),
+            None,
+        );
+        assert_eq!(event.hash_self.len(), 64);
+        assert!(event.hash_self.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// EventKind serde round-trip
+    #[test]
+    fn test_event_kind_serde() {
+        let kinds = vec![
+            (EventKind::RunStart, "\"RUN_START\""),
+            (EventKind::RunEnd, "\"RUN_END\""),
+            (EventKind::ToolCall, "\"TOOL_CALL\""),
+            (EventKind::ToolResult, "\"TOOL_RESULT\""),
+            (EventKind::OutputChunk, "\"OUTPUT_CHUNK\""),
+            (EventKind::Presence, "\"PRESENCE\""),
+            (EventKind::Tick, "\"TICK\""),
+            (EventKind::Shutdown, "\"SHUTDOWN\""),
+            (EventKind::Custom, "\"CUSTOM\""),
+        ];
+
+        for (kind, expected_json) in kinds {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, expected_json, "Serialization of {:?}", kind);
+
+            let deserialized: EventKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, kind, "Deserialization of {}", json);
+        }
     }
 }

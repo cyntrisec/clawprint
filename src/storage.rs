@@ -400,31 +400,230 @@ pub fn list_runs(base_path: &Path) -> Result<Vec<(RunId, RunMeta)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EventKind;
     use tempfile::TempDir;
 
     #[test]
     fn test_storage_lifecycle() {
         let temp_dir = TempDir::new().unwrap();
         let run_id = RunId::new();
-        
-        // Create storage
+
         let mut storage = RunStorage::new(run_id.clone(), temp_dir.path(), 10).unwrap();
-        
-        // Store artifact
+
         let data = b"test artifact data";
         let hash = storage.store_artifact(data).unwrap();
         assert!(!hash.is_empty());
-        
-        // Retrieve artifact
+
         let retrieved = storage.get_artifact(&hash).unwrap();
         assert_eq!(retrieved, data);
-        
-        // Finalize
+
         let meta = RunMeta::new(run_id.clone(), "ws://test".to_string());
         storage.finalize(&meta).unwrap();
-        
-        // Re-open and verify
+
         let storage2 = RunStorage::open(run_id, temp_dir.path()).unwrap();
         assert_eq!(storage2.event_count(), 0);
+    }
+
+    /// Verify EventKind survives a DB round-trip (was broken: stored "RunStart", loaded "RUN_START")
+    #[test]
+    fn test_event_kind_round_trip() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        let mut storage = RunStorage::new(run_id.clone(), temp_dir.path(), 100).unwrap();
+
+        let kinds = vec![
+            EventKind::RunStart,
+            EventKind::ToolCall,
+            EventKind::ToolResult,
+            EventKind::OutputChunk,
+            EventKind::Presence,
+            EventKind::Tick,
+            EventKind::Shutdown,
+            EventKind::RunEnd,
+        ];
+
+        for (i, kind) in kinds.iter().enumerate() {
+            let event = crate::Event::new(
+                run_id.clone(),
+                crate::EventId((i + 1) as u64),
+                *kind,
+                serde_json::json!({"test": true}),
+                None,
+            );
+            storage.write_event(event).unwrap();
+        }
+        storage.flush().unwrap();
+
+        let loaded = storage.load_events(None).unwrap();
+        assert_eq!(loaded.len(), kinds.len());
+
+        for (loaded_event, expected_kind) in loaded.iter().zip(kinds.iter()) {
+            assert_eq!(
+                loaded_event.kind, *expected_kind,
+                "Kind mismatch for event {}: got {:?}, expected {:?}",
+                loaded_event.event_id.0, loaded_event.kind, expected_kind
+            );
+        }
+    }
+
+    /// Verify that write_event chains hashes correctly and verify_chain passes
+    #[test]
+    fn test_hash_chain_through_storage() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        let mut storage = RunStorage::new(run_id.clone(), temp_dir.path(), 100).unwrap();
+
+        // Write 5 events
+        for i in 1..=5 {
+            let event = crate::Event::new(
+                run_id.clone(),
+                crate::EventId(i),
+                EventKind::ToolCall,
+                serde_json::json!({"step": i}),
+                None, // storage will set hash_prev
+            );
+            storage.write_event(event).unwrap();
+        }
+        storage.flush().unwrap();
+
+        // Load and verify chain structure
+        let events = storage.load_events(None).unwrap();
+        assert_eq!(events.len(), 5);
+
+        // First event has no previous hash
+        assert!(events[0].hash_prev.is_none());
+
+        // Each subsequent event links to the previous
+        for i in 1..events.len() {
+            assert_eq!(
+                events[i].hash_prev.as_ref(),
+                Some(&events[i - 1].hash_self),
+                "Event {} should link to event {}",
+                i + 1, i
+            );
+        }
+
+        // verify_chain should pass
+        assert!(storage.verify_chain().unwrap());
+    }
+
+    /// Verify that tampering is detected
+    #[test]
+    fn test_tamper_detection() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        let mut storage = RunStorage::new(run_id.clone(), temp_dir.path(), 100).unwrap();
+
+        for i in 1..=3 {
+            let event = crate::Event::new(
+                run_id.clone(),
+                crate::EventId(i),
+                EventKind::ToolCall,
+                serde_json::json!({"step": i}),
+                None,
+            );
+            storage.write_event(event).unwrap();
+        }
+        storage.flush().unwrap();
+
+        // Tamper with event 2's payload directly in the DB
+        storage.db.execute(
+            "UPDATE events SET payload = '{\"step\":999}' WHERE event_id = 2",
+            [],
+        ).unwrap();
+
+        // verify_chain should now fail
+        assert!(!storage.verify_chain().unwrap());
+    }
+
+    /// Verify that hash chain works across flush boundaries
+    #[test]
+    fn test_hash_chain_across_flushes() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        // batch_size=2 so we flush after every 2 events
+        let mut storage = RunStorage::new(run_id.clone(), temp_dir.path(), 2).unwrap();
+
+        for i in 1..=5 {
+            let event = crate::Event::new(
+                run_id.clone(),
+                crate::EventId(i),
+                EventKind::AgentEvent,
+                serde_json::json!({"n": i}),
+                None,
+            );
+            storage.write_event(event).unwrap();
+        }
+        storage.flush().unwrap();
+
+        let events = storage.load_events(None).unwrap();
+        assert_eq!(events.len(), 5);
+
+        // Chain must be unbroken across flush boundaries
+        for i in 1..events.len() {
+            assert_eq!(
+                events[i].hash_prev.as_ref(),
+                Some(&events[i - 1].hash_self),
+                "Chain broken at event {} (across flush boundary)",
+                i + 1
+            );
+        }
+        assert!(storage.verify_chain().unwrap());
+    }
+
+    /// Verify artifact integrity check catches corruption
+    #[test]
+    fn test_artifact_integrity_check() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        let storage = RunStorage::new(run_id.clone(), temp_dir.path(), 10).unwrap();
+
+        let data = b"important audit data";
+        let hash = storage.store_artifact(data).unwrap();
+
+        // Retrieval should work
+        let retrieved = storage.get_artifact(&hash).unwrap();
+        assert_eq!(retrieved, data);
+
+        // Corrupt the artifact file
+        let prefix = &hash[..2];
+        let artifact_path = storage.run_path()
+            .join("artifacts")
+            .join(prefix)
+            .join(format!("{}.zst", hash));
+        let corrupted = zstd::encode_all(b"tampered data" as &[u8], 3).unwrap();
+        fs::write(&artifact_path, corrupted).unwrap();
+
+        // Retrieval should now fail integrity check
+        let result = storage.get_artifact(&hash);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("integrity check failed"),
+            "Should report integrity failure"
+        );
+    }
+
+    /// Verify empty artifact is rejected
+    #[test]
+    fn test_empty_artifact_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        let storage = RunStorage::new(run_id.clone(), temp_dir.path(), 10).unwrap();
+
+        let result = storage.store_artifact(b"");
+        assert!(result.is_err());
+    }
+
+    /// Verify artifact deduplication
+    #[test]
+    fn test_artifact_deduplication() {
+        let temp_dir = TempDir::new().unwrap();
+        let run_id = RunId::new();
+        let storage = RunStorage::new(run_id.clone(), temp_dir.path(), 10).unwrap();
+
+        let data = b"same content";
+        let hash1 = storage.store_artifact(data).unwrap();
+        let hash2 = storage.store_artifact(data).unwrap();
+        assert_eq!(hash1, hash2);
     }
 }

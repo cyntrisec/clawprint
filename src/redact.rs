@@ -151,11 +151,76 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_string() {
-        // Use a properly-formatted JWT (all three segments start with base64 of JSON)
+    fn test_redact_string_jwt() {
         let s = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123";
         let redacted = redact_string(s);
         assert!(redacted.contains("[REDACTED-JWT]"), "JWT should be redacted, got: {}", redacted);
+    }
+
+    #[test]
+    fn test_redact_bearer_token() {
+        let s = "Bearer some-opaque-token-here";
+        let redacted = redact_string(s);
+        assert_eq!(redacted, "Bearer [REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_basic_auth() {
+        let s = "Basic dXNlcjpwYXNz";
+        let redacted = redact_string(s);
+        assert_eq!(redacted, "Basic [REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_aws_key() {
+        let s = "my key is AKIAIOSFODNN7EXAMPLE";
+        let redacted = redact_string(s);
+        assert!(redacted.contains("[REDACTED-KEY]"), "AWS key should be redacted, got: {}", redacted);
+    }
+
+    #[test]
+    fn test_redact_github_pat() {
+        // GitHub PATs are ghp_ followed by 36 alphanumeric chars
+        let s = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+        let redacted = redact_string(s);
+        assert!(redacted.contains("[REDACTED-KEY]"), "GitHub PAT should be redacted, got: {}", redacted);
+    }
+
+    /// SHA-256 hashes must NOT be redacted (was broken by old [a-f0-9]{32,} pattern)
+    #[test]
+    fn test_no_false_positive_sha256() {
+        let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let redacted = redact_string(sha);
+        assert_eq!(redacted, sha, "SHA-256 hash must not be redacted");
+    }
+
+    /// UUIDs must NOT be redacted
+    #[test]
+    fn test_no_false_positive_uuid() {
+        let uuid = "550e8400e29b41d4a716446655440000";
+        let redacted = redact_string(uuid);
+        assert_eq!(redacted, uuid, "UUID must not be redacted");
+    }
+
+    /// Normal long base64 strings must NOT be redacted
+    #[test]
+    fn test_no_false_positive_base64() {
+        let b64 = "VGhpcyBpcyBhIHBlcmZlY3RseSBub3JtYWwgYmFzZTY0IHN0cmluZyB0aGF0IHNob3VsZCBub3QgYmUgcmVkYWN0ZWQ=";
+        let redacted = redact_string(b64);
+        assert_eq!(redacted, b64, "Normal base64 content must not be redacted");
+    }
+
+    #[test]
+    fn test_redact_json_nested_array() {
+        let mut value = serde_json::json!({
+            "items": [
+                {"token": "secret123"},
+                {"name": "safe"}
+            ]
+        });
+        redact_json(&mut value);
+        assert_eq!(value["items"][0]["token"], "[REDACTED]");
+        assert_eq!(value["items"][1]["name"], "safe");
     }
 
     #[test]
@@ -163,6 +228,26 @@ mod tests {
         assert!(is_sensitive_field("api_key"));
         assert!(is_sensitive_field("Authorization"));
         assert!(is_sensitive_field("X-API-Key"));
+        assert!(is_sensitive_field("SESSION_ID"));
+        assert!(is_sensitive_field("my_secret_value"));
         assert!(!is_sensitive_field("name"));
+        assert!(!is_sensitive_field("event_id"));
+        assert!(!is_sensitive_field("hash_self"));
+    }
+
+    #[test]
+    fn test_redact_bytes_json() {
+        let json = br#"{"api_key":"secret","name":"ok"}"#;
+        let redacted = redact_bytes(json);
+        let parsed: Value = serde_json::from_slice(&redacted).unwrap();
+        assert_eq!(parsed["api_key"], "[REDACTED]");
+        assert_eq!(parsed["name"], "ok");
+    }
+
+    #[test]
+    fn test_redact_bytes_binary_passthrough() {
+        let binary = vec![0xFF, 0xFE, 0x00, 0x01];
+        let redacted = redact_bytes(&binary);
+        assert_eq!(redacted, binary, "Binary data should pass through unchanged");
     }
 }
