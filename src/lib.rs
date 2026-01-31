@@ -10,6 +10,8 @@ use sha2::{Sha256, Digest};
 pub mod daemon;
 pub mod gateway;
 pub mod ledger;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod record;
 pub mod redact;
 pub mod replay;

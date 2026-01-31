@@ -57,6 +57,9 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+#[cfg(feature = "mcp")]
+use rmcp::ServiceExt as _;
+
 use clawprint::{
     daemon::run_daemon,
     record::RecordingSession,
@@ -161,6 +164,13 @@ enum Commands {
         #[arg(short, long)]
         run: String,
         /// Output directory
+        #[arg(short, long, default_value = "./clawprints")]
+        out: PathBuf,
+    },
+    /// Start MCP server (for Claude Desktop integration)
+    #[cfg(feature = "mcp")]
+    Mcp {
+        /// Directory containing the ledger
         #[arg(short, long, default_value = "./clawprints")]
         out: PathBuf,
     },
@@ -426,6 +436,17 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        #[cfg(feature = "mcp")]
+        Commands::Mcp { out } => {
+            // MCP server: stdout is JSON-RPC only, all logging to stderr
+            let service = clawprint::mcp::ClawprintMcp::new(out)
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
+            service.waiting().await
+                .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
         }
 
         Commands::Daemon {
