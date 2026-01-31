@@ -10,9 +10,52 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
+
+static USE_COLOR: AtomicBool = AtomicBool::new(true);
+
+/// Print macro that strips ANSI codes when color is disabled
+macro_rules! cprintln {
+    ($($arg:tt)*) => {
+        if USE_COLOR.load(Ordering::Relaxed) {
+            println!($($arg)*);
+        } else {
+            let s = format!($($arg)*);
+            println!("{}", strip_ansi(&s));
+        }
+    };
+}
+
+macro_rules! cprint {
+    ($($arg:tt)*) => {
+        if USE_COLOR.load(Ordering::Relaxed) {
+            print!($($arg)*);
+        } else {
+            let s = format!($($arg)*);
+            print!("{}", strip_ansi(&s));
+        }
+    };
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_escape = false;
+    for c in s.chars() {
+        if in_escape {
+            if c.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else if c == '\x1b' {
+            in_escape = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 use clawprint::{
     record::RecordingSession,
@@ -163,14 +206,25 @@ fn discover_openclaw_token() -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Respect NO_COLOR env var and non-TTY output
+    if std::env::var("NO_COLOR").is_ok() || !std::io::stdout().is_terminal() {
+        USE_COLOR.store(false, Ordering::Relaxed);
+    }
+
+    let cli = Cli::parse();
+
+    // Only show info logs for record command; others use warn to keep output clean
+    let default_log = match &cli.command {
+        Commands::Record { .. } => "clawprint=info",
+        _ => "clawprint=warn",
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "clawprint=info".to_string()),
+                .unwrap_or_else(|_| default_log.to_string()),
         )
         .init();
-
-    let cli = Cli::parse();
 
     match cli.command {
         Commands::Record {
@@ -232,12 +286,12 @@ async fn main() -> Result<()> {
             let runs = list_runs_with_stats(&out)?;
 
             if runs.is_empty() {
-                println!("{}", "No recorded runs found.".yellow());
+                cprintln!("{}", "No recorded runs found.".yellow());
                 return Ok(());
             }
 
-            println!("\n  {}\n", "Clawprint Recordings".bright_cyan().bold());
-            println!(
+            cprintln!("\n  {}\n", "Clawprint Recordings".bright_cyan().bold());
+            cprintln!(
                 "  {:<14} {:<20} {:<14} {:>8}  {:>10}",
                 "RUN ID".bold().dimmed(),
                 "STARTED".bold().dimmed(),
@@ -245,7 +299,7 @@ async fn main() -> Result<()> {
                 "EVENTS".bold().dimmed(),
                 "SIZE".bold().dimmed(),
             );
-            println!("  {}", "─".repeat(70).dimmed());
+            cprintln!("  {}", "─".repeat(70).dimmed());
 
             let mut total_events: u64 = 0;
             let mut total_size: u64 = 0;
@@ -263,7 +317,7 @@ async fn main() -> Result<()> {
                 total_size += size;
 
                 let id_short = &run_id.0[..8.min(run_id.0.len())];
-                println!(
+                cprintln!(
                     "  {:<14} {:<20} {:<14} {:>8}  {:>10}",
                     id_short.bright_blue(),
                     meta.started_at.format("%Y-%m-%d %H:%M:%S").to_string().dimmed(),
@@ -273,8 +327,8 @@ async fn main() -> Result<()> {
                 );
             }
 
-            println!("  {}", "─".repeat(70).dimmed());
-            println!(
+            cprintln!("  {}", "─".repeat(70).dimmed());
+            cprintln!(
                 "  {} runs  {}  {}\n",
                 runs.len().to_string().bold(),
                 format!("{} events", total_events).cyan(),
@@ -285,7 +339,7 @@ async fn main() -> Result<()> {
         Commands::View { run, out, open, port } => {
             let run_id = RunId(run);
             let id_short = &run_id.0[..8.min(run_id.0.len())];
-            println!(
+            cprintln!(
                 "\n  {} Viewer for run {}\n  {}\n",
                 "Clawprint".bright_cyan().bold(),
                 id_short.bright_blue(),
@@ -309,13 +363,13 @@ async fn main() -> Result<()> {
 
             if let Some(export_path) = export {
                 std::fs::write(&export_path, &transcript)?;
-                println!(
+                cprintln!(
                     "  {} Transcript exported to {:?}",
                     "OK".green().bold(),
                     export_path,
                 );
             } else {
-                println!("{}", transcript);
+                cprintln!("{}", transcript);
             }
         }
 
@@ -326,7 +380,7 @@ async fn main() -> Result<()> {
             info!("Comparing runs: {} vs {}", run_a.0, run_b.0);
 
             let diff = diff_runs(&run_a, &run_b, &out)?;
-            println!("{}", diff);
+            cprintln!("{}", diff);
         }
 
         Commands::Verify { run, out } => {
@@ -334,22 +388,22 @@ async fn main() -> Result<()> {
             let storage = RunStorage::open(run_id.clone(), &out)?;
 
             let id_short = &run_id.0[..8.min(run_id.0.len())];
-            print!("  Verifying hash chain for {}... ", id_short.bright_blue());
+            cprint!("  Verifying hash chain for {}... ", id_short.bright_blue());
             std::io::stdout().flush()?;
 
             match storage.verify_chain() {
                 Ok(true) => {
-                    println!("{}", "VALID".green().bold());
-                    println!("  Events:    {}", storage.event_count().to_string().cyan());
-                    println!("  Root hash: {}", storage.root_hash().unwrap_or_default().dimmed());
+                    cprintln!("{}", "VALID".green().bold());
+                    cprintln!("  Events:    {}", storage.event_count().to_string().cyan());
+                    cprintln!("  Root hash: {}", storage.root_hash().unwrap_or_default().dimmed());
                 }
                 Ok(false) => {
-                    println!("{}", "TAMPERED".red().bold());
-                    eprintln!("  {}", "Hash chain verification failed - run may have been modified".red());
+                    cprintln!("{}", "TAMPERED".red().bold());
+                    eprintln!("  Hash chain verification failed - run may have been modified");
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    println!("{}: {}", "ERROR".red().bold(), e);
+                    cprintln!("{}: {}", "ERROR".red().bold(), e);
                     std::process::exit(1);
                 }
             }
@@ -360,7 +414,7 @@ async fn main() -> Result<()> {
             let storage = RunStorage::open(run_id.clone(), &out)?;
 
             let id_short = &run_id.0[..8.min(run_id.0.len())];
-            println!(
+            cprintln!(
                 "\n  {} Run {}\n",
                 "Statistics".bright_cyan().bold(),
                 id_short.bright_blue(),
@@ -370,8 +424,8 @@ async fn main() -> Result<()> {
             let breakdown = storage.event_count_by_kind()?;
             let total: u64 = breakdown.values().sum();
 
-            println!("  {}", "Event Breakdown".bold());
-            println!("  {}", "─".repeat(50).dimmed());
+            cprintln!("  {}", "Event Breakdown".bold());
+            cprintln!("  {}", "─".repeat(50).dimmed());
 
             let mut sorted: Vec<_> = breakdown.iter().collect();
             sorted.sort_by(|a, b| b.1.cmp(a.1));
@@ -382,7 +436,7 @@ async fn main() -> Result<()> {
                 let pct = (**count as f64 / total as f64) * 100.0;
                 let bar_len = ((**count as f64 / max_count as f64) * 25.0) as usize;
                 let bar: String = "█".repeat(bar_len);
-                println!(
+                cprintln!(
                     "  {:<16} {:>6} ({:>5.1}%) {}",
                     kind.cyan(),
                     count.to_string().bright_white(),
@@ -390,11 +444,11 @@ async fn main() -> Result<()> {
                     bar.green(),
                 );
             }
-            println!("  {:<16} {:>6}", "TOTAL".bold(), total.to_string().bright_white().bold());
+            cprintln!("  {:<16} {:>6}", "TOTAL".bold(), total.to_string().bright_white().bold());
 
             // Agent runs
             let agent_runs = storage.agent_run_ids()?;
-            println!(
+            cprintln!(
                 "\n  {}: {}",
                 "Agent Runs".bold(),
                 agent_runs.len().to_string().cyan(),
@@ -403,14 +457,14 @@ async fn main() -> Result<()> {
             // Timeline
             let timeline = storage.events_timeline()?;
             if !timeline.is_empty() {
-                println!("\n  {}", "Events per Minute".bold());
-                println!("  {}", "─".repeat(50).dimmed());
+                cprintln!("\n  {}", "Events per Minute".bold());
+                cprintln!("  {}", "─".repeat(50).dimmed());
 
                 let max_rate = timeline.iter().map(|(_, c)| *c).max().unwrap_or(1);
                 for (minute, count) in &timeline {
                     let bar_len = ((*count as f64 / max_rate as f64) * 30.0) as usize;
                     let bar: String = "▓".repeat(bar_len);
-                    println!(
+                    cprintln!(
                         "  {} {:>5} {}",
                         minute.dimmed(),
                         count.to_string().bright_white(),
@@ -421,7 +475,7 @@ async fn main() -> Result<()> {
 
             // Storage
             let size = storage.storage_size_bytes()?;
-            println!(
+            cprintln!(
                 "\n  {}: {}\n",
                 "Storage Size".bold(),
                 format_bytes(size).cyan(),
