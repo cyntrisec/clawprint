@@ -58,6 +58,7 @@ fn strip_ansi(s: &str) -> String {
 }
 
 use clawprint::{
+    daemon::run_daemon,
     record::RecordingSession,
     replay::{diff_runs, replay_run, generate_transcript},
     storage::{list_runs_with_stats, RunStorage},
@@ -163,6 +164,24 @@ enum Commands {
         #[arg(short, long, default_value = "./clawprints")]
         out: PathBuf,
     },
+    /// Run as a 24/7 daemon recording to a continuous ledger
+    Daemon {
+        /// Gateway WebSocket URL
+        #[arg(short, long, default_value = "ws://127.0.0.1:18789")]
+        gateway: String,
+        /// Output directory for the ledger
+        #[arg(short, long, default_value = "./clawprints")]
+        out: PathBuf,
+        /// Gateway auth token (auto-discovered from ~/.openclaw/openclaw.json if omitted)
+        #[arg(short, long)]
+        token: Option<String>,
+        /// Disable secret redaction
+        #[arg(long)]
+        no_redact: bool,
+        /// Batch size for SQLite commits
+        #[arg(long, default_value = "100")]
+        batch_size: usize,
+    },
 }
 
 fn format_duration(secs: i64) -> String {
@@ -215,7 +234,7 @@ async fn main() -> Result<()> {
 
     // Only show info logs for record command; others use warn to keep output clean
     let default_log = match &cli.command {
-        Commands::Record { .. } => "clawprint=info",
+        Commands::Record { .. } | Commands::Daemon { .. } => "clawprint=info",
         _ => "clawprint=warn",
     };
 
@@ -407,6 +426,49 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Commands::Daemon {
+            gateway,
+            out,
+            token,
+            no_redact,
+            batch_size,
+        } => {
+            let auth_token = match token {
+                Some(t) => {
+                    info!("Using token from --token flag");
+                    Some(t)
+                }
+                None => {
+                    match discover_openclaw_token() {
+                        Some(t) => {
+                            info!("Auto-discovered token from ~/.openclaw/openclaw.json");
+                            Some(t)
+                        }
+                        None => {
+                            warn!("No auth token found. Pass --token or configure gateway.auth.token in ~/.openclaw/openclaw.json");
+                            None
+                        }
+                    }
+                }
+            };
+
+            let config = Config {
+                output_dir: out,
+                redact_secrets: !no_redact,
+                gateway_url: gateway,
+                auth_token,
+                batch_size,
+                flush_interval_ms: 200,
+            };
+
+            info!("Starting Clawprint daemon...");
+            info!("Gateway: {}", config.gateway_url);
+            info!("Ledger:  {:?}", config.output_dir);
+            info!("Redaction: {}", if config.redact_secrets { "enabled" } else { "disabled" });
+
+            run_daemon(config).await?;
         }
 
         Commands::Stats { run, out } => {

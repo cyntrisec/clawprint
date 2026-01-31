@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 
+pub mod daemon;
 pub mod gateway;
 pub mod ledger;
 pub mod record;

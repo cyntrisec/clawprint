@@ -247,7 +247,7 @@ async fn recording_loop(
 }
 
 /// Map a gateway event to a clawprint Event.
-fn gateway_event_to_event(
+pub fn gateway_event_to_event(
     run_id: &RunId,
     event_id: EventId,
     gw: GatewayEvent,
