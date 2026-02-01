@@ -505,6 +505,38 @@ pub fn list_runs(base_path: &Path) -> Result<Vec<(RunId, RunMeta)>> {
 }
 
 /// List all recorded runs with storage size
+/// Resolve a (possibly short) run ID prefix to a full run ID.
+/// Scans the `runs/` directory for directories starting with the given prefix.
+/// Returns an error if zero or multiple matches are found.
+pub fn resolve_run_id(prefix: &str, base_path: &Path) -> Result<RunId> {
+    let runs_dir = base_path.join("runs");
+    if !runs_dir.exists() {
+        return Err(anyhow!("No runs directory at {:?}", runs_dir));
+    }
+
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(&runs_dir)? {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with(prefix) {
+                matches.push(name.to_string());
+            }
+        }
+    }
+
+    match matches.len() {
+        0 => Err(anyhow!("No run found matching prefix '{}'", prefix)),
+        1 => Ok(RunId(matches.into_iter().next().unwrap())),
+        n => {
+            let previews: Vec<String> = matches.iter().map(|m| m[..8.min(m.len())].to_string()).collect();
+            Err(anyhow!(
+                "Prefix '{}' is ambiguous — matches {} runs: {}",
+                prefix, n, previews.join(", ")
+            ))
+        }
+    }
+}
+
 pub fn list_runs_with_stats(base_path: &Path) -> Result<Vec<(RunId, RunMeta, u64)>> {
     let runs_dir = base_path.join("runs");
     if !runs_dir.exists() {

@@ -6,7 +6,6 @@ A step-by-step guide to installing, configuring, and using Clawprint to record, 
 
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [Try It Without a Gateway (Demo)](#try-it-without-a-gateway-demo)
 - [Using Clawprint with OpenClaw (End-to-End)](#using-clawprint-with-openclaw-end-to-end)
 - [Recording Agent Runs](#recording-agent-runs)
 - [Browsing Recordings](#browsing-recordings)
@@ -29,7 +28,7 @@ A step-by-step guide to installing, configuring, and using Clawprint to record, 
 ## Prerequisites
 
 - **Rust toolchain** (1.80+) — install from https://rustup.rs
-- **OpenClaw** (for live recording) — install from https://openclaw.bot or `npm install -g openclaw@latest`. Requires Node.js 22+. Not needed for the demo.
+- **OpenClaw** (for live recording) — install from https://openclaw.bot or `npm install -g openclaw@latest`. Requires Node.js 22+.
 - A browser (for the web dashboard)
 
 ## Installation
@@ -60,28 +59,6 @@ cargo install --path .
 clawprint --version
 clawprint --help
 ```
-
----
-
-## Try It Without a Gateway (Demo)
-
-You don't need a running OpenClaw instance to explore Clawprint. The included demo generates a synthetic recording with realistic agent events.
-
-### Quick demo
-
-```bash
-cargo run --example demo
-```
-
-This creates a recording in `./clawprints/` with 2 agent conversation runs and 30 events. The output tells you the run ID and which commands to try next.
-
-### Full walkthrough script
-
-```bash
-./demo.sh
-```
-
-This script builds Clawprint, generates demo data, and automatically runs every command (list, verify, stats, replay, view) so you can see the full workflow.
 
 ---
 

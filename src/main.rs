@@ -64,9 +64,9 @@ use clawprint::{
     daemon::run_daemon,
     record::RecordingSession,
     replay::{diff_runs, replay_run, generate_transcript},
-    storage::{list_runs_with_stats, RunStorage},
+    storage::{list_runs_with_stats, resolve_run_id, RunStorage},
     viewer::start_viewer,
-    Config, RunId,
+    Config,
 };
 
 #[derive(Parser)]
@@ -392,7 +392,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::View { run, out, open, port } => {
-            let run_id = RunId(run);
+            let run_id = resolve_run_id(&run, &out)?;
             let id_short = &run_id.0[..8.min(run_id.0.len())];
             cprintln!(
                 "\n  {} Viewer for run {}\n  {}\n",
@@ -411,7 +411,7 @@ async fn main() -> Result<()> {
 
         Commands::Open { run, out, port } => {
             let run_id = match run {
-                Some(r) => RunId(r),
+                Some(r) => resolve_run_id(&r, &out)?,
                 None => {
                     // Find the latest run by started_at
                     let runs = list_runs_with_stats(&out)?;
@@ -440,7 +440,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Replay { run, out, offline, export } => {
-            let run_id = RunId(run);
+            let run_id = resolve_run_id(&run, &out)?;
             info!("Replaying run: {}", run_id.0);
 
             let result = replay_run(&run_id, &out, offline)?;
@@ -459,8 +459,8 @@ async fn main() -> Result<()> {
         }
 
         Commands::Diff { run_a, run_b, out } => {
-            let run_a = RunId(run_a);
-            let run_b = RunId(run_b);
+            let run_a = resolve_run_id(&run_a, &out)?;
+            let run_b = resolve_run_id(&run_b, &out)?;
 
             info!("Comparing runs: {} vs {}", run_a.0, run_b.0);
 
@@ -469,7 +469,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Verify { run, out } => {
-            let run_id = RunId(run);
+            let run_id = resolve_run_id(&run, &out)?;
             let storage = RunStorage::open(run_id.clone(), &out)?;
 
             let id_short = &run_id.0[..8.min(run_id.0.len())];
@@ -549,7 +549,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Stats { run, out } => {
-            let run_id = RunId(run);
+            let run_id = resolve_run_id(&run, &out)?;
             let storage = RunStorage::open(run_id.clone(), &out)?;
 
             let id_short = &run_id.0[..8.min(run_id.0.len())];

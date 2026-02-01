@@ -16,10 +16,6 @@ name = "clawprint"
 path = "src/main.rs"
 
 [[example]]
-name = "demo"
-path = "examples/demo.rs"
-
-[[example]]
 name = "explore_gateway"
 path = "examples/explore_gateway.rs"
 
