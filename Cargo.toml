@@ -5,7 +5,7 @@ edition = "2024"
 description = "Tamper-evident audit trail for OpenClaw agent runs"
 authors = ["Clawprint Contributors"]
 license = "MIT"
-repository = "https://github.com/tsyrulb/clawprint"
+repository = "https://github.com/cyntrisec/clawprint"
 
 [lib]
 name = "clawprint"

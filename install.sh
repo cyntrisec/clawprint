@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Clawprint installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/tsyrulb/clawprint/master/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/cyntrisec/clawprint/master/install.sh | bash
 
 set -euo pipefail
 
-REPO="tsyrulb/clawprint"
+REPO="cyntrisec/clawprint"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # Detect OS and architecture
