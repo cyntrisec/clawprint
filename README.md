@@ -21,7 +21,7 @@ Clawprint is a tamper-evident audit trail for OpenClaw agent runs. It silently t
 - **Web dashboard** — Clean minimal dashboard with filtered/paginated traces, search, and bar charts
 - **CLI analytics** — Colored output, event histograms, per-minute timeline, live recording spinner
 - **Run diffing** — Compare two runs side-by-side with event kind breakdown
-- **Cross-platform** — Prebuilt binaries for Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon)
+- **Cross-platform** — Prebuilt binaries for Linux, macOS, and Windows
 - **CI/CD** — GitHub Actions for testing, linting, and automated release builds
 
 ## Quick Start
@@ -304,6 +304,10 @@ curl -fsSL https://raw.githubusercontent.com/tsyrulb/clawprint/master/install.sh
 
 Downloads the latest release binary for your platform (Linux x86_64/aarch64, macOS Intel/Apple Silicon). Falls back to building from source if no binary is available.
 
+### Windows
+
+Download `clawprint-windows-x86_64.exe` from the [latest release](https://github.com/tsyrulb/clawprint/releases/latest) and add it to your PATH.
+
 ### From source
 
 ```bash
@@ -342,7 +346,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-This builds binaries for all 4 platforms and creates a GitHub Release with the assets attached.
+This builds binaries for all 5 platforms (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows x86_64) and creates a GitHub Release with the assets attached.
 
 ## License
 

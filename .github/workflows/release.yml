@@ -35,6 +35,10 @@ jobs:
             runner: macos-14
             asset: clawprint-macos-aarch64
 
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: clawprint-windows-x86_64.exe
+
     steps:
       - uses: actions/checkout@v4
 
@@ -54,8 +58,14 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename binary
+      - name: Rename binary (unix)
+        if: runner.os != 'Windows'
         run: cp target/${{ matrix.target }}/release/clawprint ${{ matrix.asset }}
+
+      - name: Rename binary (windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/clawprint.exe ${{ matrix.asset }}
+        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -81,7 +91,7 @@ jobs:
           for dir in artifacts/*/; do
             cp "$dir"* release/
           done
-          chmod +x release/*
+          chmod +x release/clawprint-linux-* release/clawprint-macos-* 2>/dev/null || true
           ls -lh release/
 
       - name: Create release
