@@ -4,9 +4,9 @@
 //! is a single append-only database that grows forever. Agent runs are
 //! detected automatically from gateway event payloads.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
@@ -75,10 +75,7 @@ impl Ledger {
             [],
         )?;
 
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)",
-            [],
-        )?;
+        db.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)", [])?;
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind)",
             [],
@@ -105,11 +102,7 @@ impl Ledger {
             )
             .optional()?;
 
-        let event_count: u64 = db.query_row(
-            "SELECT COUNT(*) FROM events",
-            [],
-            |row| row.get(0),
-        )?;
+        let event_count: u64 = db.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
 
         if event_count > 0 {
             info!("Opened ledger at {:?} ({} events)", db_path, event_count);
@@ -147,11 +140,7 @@ impl Ledger {
             )
             .optional()?;
 
-        let event_count: u64 = db.query_row(
-            "SELECT COUNT(*) FROM events",
-            [],
-            |row| row.get(0),
-        )?;
+        let event_count: u64 = db.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
 
         Ok(Self {
             db,
@@ -166,7 +155,8 @@ impl Ledger {
     /// Extract agent_run ID from event payload.
     /// Looks for `payload.data.runId` (OpenClaw gateway format).
     fn extract_agent_run(event: &Event) -> Option<String> {
-        event.payload
+        event
+            .payload
             .pointer("/data/runId")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -180,7 +170,9 @@ impl Ledger {
         self.event_count += 1;
         event.event_id = EventId(self.event_count);
 
-        let prev_hash = self.batch_buffer.last()
+        let prev_hash = self
+            .batch_buffer
+            .last()
             .map(|e| e.hash_self.clone())
             .or_else(|| self.last_hash.clone());
 
@@ -240,7 +232,10 @@ impl Ledger {
         tx.commit()?;
         self.batch_buffer.clear();
 
-        debug!("Flushed {} events to ledger (total: {})", flushed, self.event_count);
+        debug!(
+            "Flushed {} events to ledger (total: {})",
+            flushed, self.event_count
+        );
 
         Ok(())
     }
@@ -258,7 +253,8 @@ impl Ledger {
             return Ok(Some(last.ts));
         }
 
-        let ts: Option<String> = self.db
+        let ts: Option<String> = self
+            .db
             .query_row(
                 "SELECT ts FROM events ORDER BY event_id DESC LIMIT 1",
                 [],
@@ -329,7 +325,13 @@ impl Ledger {
             let last_ts: String = row.get(2)?;
             let event_count: u64 = row.get(3)?;
             let tool_call_count: u64 = row.get(4)?;
-            Ok((agent_run_id, first_ts, last_ts, event_count, tool_call_count))
+            Ok((
+                agent_run_id,
+                first_ts,
+                last_ts,
+                event_count,
+                tool_call_count,
+            ))
         })?;
 
         let mut runs = Vec::new();
@@ -363,13 +365,12 @@ impl Ledger {
         let mut stmt = self.db.prepare(
             "SELECT event_id, run_id, ts, kind, agent_run, span_id, parent_span_id, actor,
                     payload, artifact_refs, hash_prev, hash_self
-             FROM events WHERE agent_run = ? ORDER BY event_id"
+             FROM events WHERE agent_run = ? ORDER BY event_id",
         )?;
 
-        let events = stmt.query_map(params![agent_run], |row| {
-            row_to_event(row)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        let events = stmt
+            .query_map(params![agent_run], row_to_event)?
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(events)
     }
@@ -427,19 +428,18 @@ impl Ledger {
             param_values.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = self.db.prepare(&sql)?;
-        let events = stmt.query_map(params_ref.as_slice(), |row| {
-            row_to_event(row)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        let events = stmt
+            .query_map(params_ref.as_slice(), row_to_event)?
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(events)
     }
 
     /// Event count grouped by kind.
     pub fn event_count_by_kind(&self) -> Result<HashMap<String, u64>> {
-        let mut stmt = self.db.prepare(
-            "SELECT kind, COUNT(*) FROM events GROUP BY kind ORDER BY COUNT(*) DESC"
-        )?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT kind, COUNT(*) FROM events GROUP BY kind ORDER BY COUNT(*) DESC")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?;
@@ -453,9 +453,9 @@ impl Ledger {
 
     /// Event count by kind for a specific agent run.
     fn event_count_by_kind_for_run(&self, agent_run: &str) -> Result<HashMap<String, u64>> {
-        let mut stmt = self.db.prepare(
-            "SELECT kind, COUNT(*) FROM events WHERE agent_run = ? GROUP BY kind"
-        )?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT kind, COUNT(*) FROM events WHERE agent_run = ? GROUP BY kind")?;
         let rows = stmt.query_map(params![agent_run], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?;
@@ -468,19 +468,18 @@ impl Ledger {
     }
 
     /// Events per minute timeline, optionally filtered by since.
-    pub fn events_timeline(
-        &self,
-        since: Option<DateTime<Utc>>,
-    ) -> Result<Vec<(String, u64)>> {
+    pub fn events_timeline(&self, since: Option<DateTime<Utc>>) -> Result<Vec<(String, u64)>> {
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
             Some(s) => (
                 "SELECT substr(ts, 12, 5) as minute, COUNT(*)
-                 FROM events WHERE ts >= ? GROUP BY minute ORDER BY minute".to_string(),
+                 FROM events WHERE ts >= ? GROUP BY minute ORDER BY minute"
+                    .to_string(),
                 vec![Box::new(s.to_rfc3339()) as Box<dyn rusqlite::types::ToSql>],
             ),
             None => (
                 "SELECT substr(ts, 12, 5) as minute, COUNT(*)
-                 FROM events GROUP BY minute ORDER BY minute".to_string(),
+                 FROM events GROUP BY minute ORDER BY minute"
+                    .to_string(),
                 vec![],
             ),
         };
@@ -570,7 +569,7 @@ impl Ledger {
         let mut stmt = self.db.prepare(
             "SELECT event_id, run_id, ts, kind, agent_run, span_id, parent_span_id, actor,
                     payload, artifact_refs, hash_prev, hash_self
-             FROM events ORDER BY event_id"
+             FROM events ORDER BY event_id",
         )?;
 
         let mut rows = stmt.query([])?;
@@ -586,11 +585,11 @@ impl Ledger {
                 return Ok((false, count));
             }
 
-            if let Some(ref expected_prev) = prev_hash {
-                if event.hash_prev.as_ref() != Some(expected_prev) {
-                    warn!("Ledger event {} has broken chain link", event.event_id.0);
-                    return Ok((false, count));
-                }
+            if let Some(ref expected_prev) = prev_hash
+                && event.hash_prev.as_ref() != Some(expected_prev)
+            {
+                warn!("Ledger event {} has broken chain link", event.event_id.0);
+                return Ok((false, count));
             }
 
             prev_hash = Some(event.hash_self);
@@ -641,9 +640,9 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
     let hash_self: String = row.get(11)?;
 
     let ts = DateTime::parse_from_rfc3339(&ts_str)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-            1, rusqlite::types::Type::Text, Box::new(e),
-        ))?
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+        })?
         .with_timezone(&Utc);
 
     let kind = match kind_str.as_str() {
@@ -659,14 +658,12 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
         _ => EventKind::Custom,
     };
 
-    let payload: serde_json::Value = serde_json::from_str(&payload_str)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-            8, rusqlite::types::Type::Text, Box::new(e),
-        ))?;
-    let artifact_refs: Vec<String> = serde_json::from_str(&artifact_refs_str)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-            9, rusqlite::types::Type::Text, Box::new(e),
-        ))?;
+    let payload: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let artifact_refs: Vec<String> = serde_json::from_str(&artifact_refs_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
+    })?;
 
     Ok(Event {
         run_id: RunId(run_id_str),
@@ -689,13 +686,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_event(id: u64, kind: EventKind, payload: serde_json::Value) -> Event {
-        Event::new(
-            RunId("test".to_string()),
-            EventId(id),
-            kind,
-            payload,
-            None,
-        )
+        Event::new(RunId("test".to_string()), EventId(id), kind, payload, None)
     }
 
     #[test]
@@ -760,10 +751,13 @@ mod tests {
         ledger.flush().unwrap();
 
         // Tamper with an event
-        ledger.db.execute(
-            "UPDATE events SET payload = '{\"step\":999}' WHERE event_id = 3",
-            [],
-        ).unwrap();
+        ledger
+            .db
+            .execute(
+                "UPDATE events SET payload = '{\"step\":999}' WHERE event_id = 3",
+                [],
+            )
+            .unwrap();
 
         let (valid, _) = ledger.verify_chain().unwrap();
         assert!(!valid);
@@ -775,15 +769,27 @@ mod tests {
         let mut ledger = Ledger::open(temp.path(), 100).unwrap();
 
         // Events with agent run IDs
-        let event1 = make_event(1, EventKind::AgentEvent, serde_json::json!({
-            "data": {"runId": "run-abc", "type": "tool_use", "tool": "read_file", "args": {}}
-        }));
-        let event2 = make_event(2, EventKind::AgentEvent, serde_json::json!({
-            "data": {"runId": "run-abc", "type": "tool_use", "tool": "write_file", "args": {}}
-        }));
-        let event3 = make_event(3, EventKind::AgentEvent, serde_json::json!({
-            "data": {"runId": "run-def", "type": "tool_use", "tool": "bash", "args": {}}
-        }));
+        let event1 = make_event(
+            1,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"runId": "run-abc", "type": "tool_use", "tool": "read_file", "args": {}}
+            }),
+        );
+        let event2 = make_event(
+            2,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"runId": "run-abc", "type": "tool_use", "tool": "write_file", "args": {}}
+            }),
+        );
+        let event3 = make_event(
+            3,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"runId": "run-def", "type": "tool_use", "tool": "bash", "args": {}}
+            }),
+        );
         // Event without agent run
         let event4 = make_event(4, EventKind::Tick, serde_json::json!({"ts": 1}));
 
@@ -811,12 +817,20 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut ledger = Ledger::open(temp.path(), 100).unwrap();
 
-        let event1 = make_event(1, EventKind::AgentEvent, serde_json::json!({
-            "data": {"tool": "read_file", "path": "/etc/passwd"}
-        }));
-        let event2 = make_event(2, EventKind::AgentEvent, serde_json::json!({
-            "data": {"tool": "write_file", "path": "/tmp/output.txt"}
-        }));
+        let event1 = make_event(
+            1,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"tool": "read_file", "path": "/etc/passwd"}
+            }),
+        );
+        let event2 = make_event(
+            2,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"tool": "write_file", "path": "/tmp/output.txt"}
+            }),
+        );
         let event3 = make_event(3, EventKind::Tick, serde_json::json!({"ts": 1}));
 
         ledger.append_event(event1).unwrap();
@@ -824,16 +838,22 @@ mod tests {
         ledger.append_event(event3).unwrap();
         ledger.flush().unwrap();
 
-        let results = ledger.search_events("passwd", None, None, None, 100).unwrap();
+        let results = ledger
+            .search_events("passwd", None, None, None, 100)
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         let results = ledger.search_events("file", None, None, None, 100).unwrap();
         assert_eq!(results.len(), 2);
 
-        let results = ledger.search_events("file", Some("AGENT_EVENT"), None, None, 100).unwrap();
+        let results = ledger
+            .search_events("file", Some("AGENT_EVENT"), None, None, 100)
+            .unwrap();
         assert_eq!(results.len(), 2);
 
-        let results = ledger.search_events("file", Some("TICK"), None, None, 100).unwrap();
+        let results = ledger
+            .search_events("file", Some("TICK"), None, None, 100)
+            .unwrap();
         assert_eq!(results.len(), 0);
     }
 
@@ -842,15 +862,27 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut ledger = Ledger::open(temp.path(), 100).unwrap();
 
-        let event1 = make_event(1, EventKind::AgentEvent, serde_json::json!({
-            "data": {"runId": "run-1", "type": "tool_use", "tool": "read_file", "args": {"path": "/etc/hosts"}}
-        }));
-        let event2 = make_event(2, EventKind::AgentEvent, serde_json::json!({
-            "data": {"runId": "run-1", "type": "tool_result", "tool": "read_file"}
-        }));
-        let event3 = make_event(3, EventKind::AgentEvent, serde_json::json!({
-            "data": {"runId": "run-1", "type": "tool_use", "tool": "bash", "args": {"command": "ls"}}
-        }));
+        let event1 = make_event(
+            1,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"runId": "run-1", "type": "tool_use", "tool": "read_file", "args": {"path": "/etc/hosts"}}
+            }),
+        );
+        let event2 = make_event(
+            2,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"runId": "run-1", "type": "tool_result", "tool": "read_file"}
+            }),
+        );
+        let event3 = make_event(
+            3,
+            EventKind::AgentEvent,
+            serde_json::json!({
+                "data": {"runId": "run-1", "type": "tool_use", "tool": "bash", "args": {"command": "ls"}}
+            }),
+        );
 
         ledger.append_event(event1).unwrap();
         ledger.append_event(event2).unwrap();
@@ -872,9 +904,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut ledger = Ledger::open(temp.path(), 100).unwrap();
 
-        ledger.append_event(make_event(1, EventKind::Tick, serde_json::json!({}))).unwrap();
-        ledger.append_event(make_event(2, EventKind::Tick, serde_json::json!({}))).unwrap();
-        ledger.append_event(make_event(3, EventKind::AgentEvent, serde_json::json!({}))).unwrap();
+        ledger
+            .append_event(make_event(1, EventKind::Tick, serde_json::json!({})))
+            .unwrap();
+        ledger
+            .append_event(make_event(2, EventKind::Tick, serde_json::json!({})))
+            .unwrap();
+        ledger
+            .append_event(make_event(3, EventKind::AgentEvent, serde_json::json!({})))
+            .unwrap();
         ledger.flush().unwrap();
 
         let counts = ledger.event_count_by_kind().unwrap();
@@ -887,7 +925,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let ledger = Ledger::open(temp.path(), 100).unwrap();
 
-        ledger.set_meta("started_at", "2026-01-31T12:00:00Z").unwrap();
+        ledger
+            .set_meta("started_at", "2026-01-31T12:00:00Z")
+            .unwrap();
         let val = ledger.get_meta("started_at").unwrap();
         assert_eq!(val, Some("2026-01-31T12:00:00Z".to_string()));
 
@@ -900,7 +940,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         {
             let mut ledger = Ledger::open(temp.path(), 100).unwrap();
-            ledger.append_event(make_event(1, EventKind::Tick, serde_json::json!({}))).unwrap();
+            ledger
+                .append_event(make_event(1, EventKind::Tick, serde_json::json!({})))
+                .unwrap();
             ledger.flush().unwrap();
         }
         {

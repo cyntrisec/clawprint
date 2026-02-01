@@ -4,12 +4,12 @@
 
 use anyhow::Result;
 use axum::{
+    Router,
     extract::{Path, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{Html, IntoResponse, Json},
     routing::get,
-    Router,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::storage::{list_runs_with_stats, RunStorage};
 use crate::RunId;
+use crate::storage::{RunStorage, list_runs_with_stats};
 
 #[derive(Clone)]
 struct ViewerState {
@@ -30,14 +30,22 @@ pub async fn bearer_auth(
     req: Request,
     next: Next,
 ) -> impl IntoResponse {
-    let auth_header = req.headers().get("authorization").and_then(|v| v.to_str().ok());
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
     match auth_header {
         Some(val) if val == format!("Bearer {}", *expected) => next.run(req).await.into_response(),
         _ => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
     }
 }
 
-pub async fn start_viewer(base_path: PathBuf, host: [u8; 4], port: u16, token: Option<String>) -> Result<()> {
+pub async fn start_viewer(
+    base_path: PathBuf,
+    host: [u8; 4],
+    port: u16,
+    token: Option<String>,
+) -> Result<()> {
     let state = ViewerState { base_path };
 
     let app = Router::new()
@@ -75,16 +83,23 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-fn format_duration_html(start: chrono::DateTime<chrono::Utc>, end: Option<chrono::DateTime<chrono::Utc>>) -> String {
+fn format_duration_html(
+    start: chrono::DateTime<chrono::Utc>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
     match end {
         Some(e) => {
             let secs = e.signed_duration_since(start).num_seconds();
             let h = secs / 3600;
             let m = (secs % 3600) / 60;
             let s = secs % 60;
-            if h > 0 { format!("{}h {}m {}s", h, m, s) }
-            else if m > 0 { format!("{}m {}s", m, s) }
-            else { format!("{}s", s) }
+            if h > 0 {
+                format!("{}h {}m {}s", h, m, s)
+            } else if m > 0 {
+                format!("{}m {}s", m, s)
+            } else {
+                format!("{}s", s)
+            }
         }
         None => "recording...".to_string(),
     }
@@ -93,9 +108,13 @@ fn format_duration_html(start: chrono::DateTime<chrono::Utc>, end: Option<chrono
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
-    if bytes >= MB { format!("{:.1} MB", bytes as f64 / MB as f64) }
-    else if bytes >= KB { format!("{:.1} KB", bytes as f64 / KB as f64) }
-    else { format!("{} B", bytes) }
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,17 +131,23 @@ async fn index_handler(State(state): State<ViewerState>) -> impl IntoResponse {
     let total_events: u64 = runs.iter().map(|(_, m, _)| m.event_count).sum();
     let total_size: u64 = runs.iter().map(|(_, _, s)| s).sum();
 
-    let runs_html: String = runs.iter().map(|(run_id, meta, size)| {
-        let id_esc = escape_html(&run_id.0);
-        let id_short = if run_id.0.len() >= 8 { escape_html(&run_id.0[..8]) } else { id_esc.clone() };
-        let dur = format_duration_html(meta.started_at, meta.ended_at);
-        let status = if meta.ended_at.is_some() {
-            r#"<span class="badge complete">Complete</span>"#
-        } else {
-            r#"<span class="badge progress">Recording</span>"#
-        };
-        format!(
-            r#"<a href="/view/{id}" class="run-card">
+    let runs_html: String = runs
+        .iter()
+        .map(|(run_id, meta, size)| {
+            let id_esc = escape_html(&run_id.0);
+            let id_short = if run_id.0.len() >= 8 {
+                escape_html(&run_id.0[..8])
+            } else {
+                id_esc.clone()
+            };
+            let dur = format_duration_html(meta.started_at, meta.ended_at);
+            let status = if meta.ended_at.is_some() {
+                r#"<span class="badge complete">Complete</span>"#
+            } else {
+                r#"<span class="badge progress">Recording</span>"#
+            };
+            format!(
+                r#"<a href="/view/{id}" class="run-card">
                 <div class="run-card-header">
                     <code class="run-id">{short}</code>
                     {status}
@@ -135,26 +160,27 @@ async fn index_handler(State(state): State<ViewerState>) -> impl IntoResponse {
                     <span><b>Size</b> {size}</span>
                 </div>
             </a>"#,
-            id = id_esc,
-            short = id_short,
-            status = status,
-            started = meta.started_at.format("%Y-%m-%d %H:%M:%S"),
-            dur = dur,
-            events = meta.event_count,
-            size = format_bytes(*size),
-        )
-    }).collect();
+                id = id_esc,
+                short = id_short,
+                status = status,
+                started = meta.started_at.format("%Y-%m-%d %H:%M:%S"),
+                dur = dur,
+                events = meta.event_count,
+                size = format_bytes(*size),
+            )
+        })
+        .collect();
 
-    Html(DASHBOARD_HTML
-        .replace("{{TOTAL_RUNS}}", &total_runs.to_string())
-        .replace("{{TOTAL_EVENTS}}", &total_events.to_string())
-        .replace("{{TOTAL_SIZE}}", &format_bytes(total_size))
-        .replace("{{RUNS}}", &runs_html))
+    Html(
+        DASHBOARD_HTML
+            .replace("{{TOTAL_RUNS}}", &total_runs.to_string())
+            .replace("{{TOTAL_EVENTS}}", &total_events.to_string())
+            .replace("{{TOTAL_SIZE}}", &format_bytes(total_size))
+            .replace("{{RUNS}}", &runs_html),
+    )
 }
 
-async fn view_run_handler(
-    Path(run_id): Path<String>,
-) -> impl IntoResponse {
+async fn view_run_handler(Path(run_id): Path<String>) -> impl IntoResponse {
     Html(RUN_DETAIL_HTML.replace("{{RUN_ID}}", &escape_html(&run_id)))
 }
 
@@ -165,13 +191,18 @@ async fn view_run_handler(
 async fn list_runs_handler(State(state): State<ViewerState>) -> impl IntoResponse {
     match list_runs_with_stats(&state.base_path) {
         Ok(runs) => {
-            let j: Vec<_> = runs.into_iter().map(|(id, meta, size)| serde_json::json!({
-                "run_id": id.0,
-                "started_at": meta.started_at,
-                "ended_at": meta.ended_at,
-                "event_count": meta.event_count,
-                "size": size,
-            })).collect();
+            let j: Vec<_> = runs
+                .into_iter()
+                .map(|(id, meta, size)| {
+                    serde_json::json!({
+                        "run_id": id.0,
+                        "started_at": meta.started_at,
+                        "ended_at": meta.ended_at,
+                        "event_count": meta.event_count,
+                        "size": size,
+                    })
+                })
+                .collect();
             Json(j).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -191,7 +222,8 @@ async fn get_run_handler(
                 "event_count": storage.event_count(),
                 "root_hash": storage.root_hash(),
                 "chain_valid": valid,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
@@ -205,33 +237,34 @@ async fn get_events_handler(
     let run_id = RunId(run_id);
 
     let page: usize = params.get("page").and_then(|s| s.parse().ok()).unwrap_or(1);
-    let per_page: usize = params.get("per_page").and_then(|s| s.parse().ok()).unwrap_or(50);
+    let per_page: usize = params
+        .get("per_page")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
     let offset = (page.saturating_sub(1)) * per_page;
 
-    let kind_strs: Option<Vec<String>> = params.get("kind").map(|k| {
-        k.split(',').map(|s| s.to_string()).collect()
-    });
-    let kind_refs: Option<Vec<&str>> = kind_strs.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+    let kind_strs: Option<Vec<String>> = params
+        .get("kind")
+        .map(|k| k.split(',').map(|s| s.to_string()).collect());
+    let kind_refs: Option<Vec<&str>> = kind_strs
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
 
     let search = params.get("search").map(|s| s.as_str());
 
     match RunStorage::open(run_id, &state.base_path) {
         Ok(storage) => {
-            match storage.load_events_filtered(
-                kind_refs.as_deref(),
-                search,
-                offset,
-                per_page,
-            ) {
+            match storage.load_events_filtered(kind_refs.as_deref(), search, offset, per_page) {
                 Ok((events, total)) => {
-                    let total_pages = (total + per_page as u64 - 1) / per_page as u64;
+                    let total_pages = total.div_ceil(per_page as u64);
                     Json(serde_json::json!({
                         "events": events,
                         "total": total,
                         "page": page,
                         "per_page": per_page,
                         "total_pages": total_pages,
-                    })).into_response()
+                    }))
+                    .into_response()
                 }
                 Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
             }
@@ -254,7 +287,8 @@ async fn get_run_stats_handler(
                 "event_breakdown": breakdown,
                 "timeline": timeline,
                 "agent_run_count": agent_runs.len(),
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
@@ -506,8 +540,10 @@ mod tests {
 
     #[test]
     fn test_escape_html() {
-        assert_eq!(escape_html("<script>alert(1)</script>"),
-                   "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(
+            escape_html("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
         assert_eq!(escape_html("a & b"), "a &amp; b");
         assert_eq!(escape_html(r#"x="y""#), "x=&quot;y&quot;");
         assert_eq!(escape_html("it's"), "it&#x27;s");

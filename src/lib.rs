@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 pub mod daemon;
 pub mod gateway;
@@ -141,8 +141,8 @@ impl Event {
         };
 
         // Serialize to canonical JSON - must not silently default
-        let json = serde_json::to_string(&canonical)
-            .expect("canonical event must be JSON-serializable");
+        let json =
+            serde_json::to_string(&canonical).expect("canonical event must be JSON-serializable");
 
         // Compute hash
         let mut hasher = Sha256::new();

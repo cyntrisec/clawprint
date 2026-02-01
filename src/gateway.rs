@@ -3,14 +3,16 @@
 //! Implements OpenClaw Gateway protocol v3 (req/res/event frames)
 //! to passively observe bot activity.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
+};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
@@ -109,12 +111,14 @@ impl GatewayClient {
         self.ws_stream = Some(ws_stream);
 
         // Step 1: receive connect.challenge event
-        let challenge = timeout(Duration::from_secs(10), self.recv_frame()).await
+        let challenge = timeout(Duration::from_secs(10), self.recv_frame())
+            .await
             .map_err(|_| anyhow!("Handshake timeout waiting for connect.challenge"))??;
 
         match &challenge {
             IncomingFrame::Event { event, payload, .. } if event == "connect.challenge" => {
-                let nonce = payload.get("nonce")
+                let nonce = payload
+                    .get("nonce")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(none)");
                 info!("Received challenge, nonce: {}", nonce);
@@ -147,11 +151,17 @@ impl GatewayClient {
         self.send_json(&connect_req).await?;
 
         // Step 3: receive hello-ok response
-        let resp = timeout(Duration::from_secs(10), self.recv_frame()).await
+        let resp = timeout(Duration::from_secs(10), self.recv_frame())
+            .await
             .map_err(|_| anyhow!("Handshake timeout waiting for hello-ok"))??;
 
         match resp {
-            IncomingFrame::Response { ok: true, payload, id, .. } => {
+            IncomingFrame::Response {
+                ok: true,
+                payload,
+                id,
+                ..
+            } => {
                 if id != req_id {
                     warn!("Response id mismatch: expected {}, got {}", req_id, id);
                 }
@@ -165,7 +175,9 @@ impl GatewayClient {
                 self.conn_id = Some(conn_id.clone());
                 Ok(conn_id)
             }
-            IncomingFrame::Response { ok: false, error, .. } => {
+            IncomingFrame::Response {
+                ok: false, error, ..
+            } => {
                 let msg = error
                     .map(|e| format!("{}: {}", e.code, e.message))
                     .unwrap_or_else(|| "unknown error".to_string());
@@ -178,7 +190,9 @@ impl GatewayClient {
     /// Run the event loop, forwarding gateway events into `tx`.
     /// This consumes the WebSocket stream — call after `connect()`.
     pub async fn run(mut self, tx: mpsc::Sender<GatewayEvent>) -> Result<()> {
-        let mut ws = self.ws_stream.take()
+        let mut ws = self
+            .ws_stream
+            .take()
             .ok_or_else(|| anyhow!("Not connected"))?;
 
         let mut ping_interval = interval(Duration::from_secs(25));
@@ -311,7 +325,11 @@ mod tests {
         let json = r#"{"type":"event","event":"tick","payload":{"ts":1706596040000},"seq":1}"#;
         let frame: IncomingFrame = serde_json::from_str(json).unwrap();
         match frame {
-            IncomingFrame::Event { event, payload, seq } => {
+            IncomingFrame::Event {
+                event,
+                payload,
+                seq,
+            } => {
                 assert_eq!(event, "tick");
                 assert_eq!(payload["ts"], 1706596040000u64);
                 assert_eq!(seq, Some(1));

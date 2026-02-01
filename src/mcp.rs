@@ -9,12 +9,8 @@
 use std::path::PathBuf;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
-    model::*,
-    schemars, tool,
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    tool_router, tool_handler,
+    ErrorData as McpError, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, schemars, tool, tool_handler, tool_router,
 };
 
 use crate::ledger::Ledger;
@@ -103,14 +99,13 @@ impl ClawprintMcp {
 
     /// Open a read-only ledger connection.
     fn open_ledger(&self) -> Result<Ledger, McpError> {
-        Ledger::open_readonly(&self.ledger_path).map_err(|e| {
-            McpError::internal_error(format!("Failed to open ledger: {}", e), None)
-        })
+        Ledger::open_readonly(&self.ledger_path)
+            .map_err(|e| McpError::internal_error(format!("Failed to open ledger: {}", e), None))
     }
 
     /// Parse a datetime string like "2026-01-31T12:00:00Z" or relative like "today".
     fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-        use chrono::{NaiveDate, Utc, TimeZone};
+        use chrono::{NaiveDate, TimeZone, Utc};
 
         let s = s.trim();
 
@@ -119,12 +114,14 @@ impl ClawprintMcp {
         match s.to_lowercase().as_str() {
             "today" => {
                 let today = now.date_naive();
-                return today.and_hms_opt(0, 0, 0)
+                return today
+                    .and_hms_opt(0, 0, 0)
                     .map(|dt| Utc.from_utc_datetime(&dt));
             }
             "yesterday" => {
                 let yesterday = now.date_naive() - chrono::Duration::days(1);
-                return yesterday.and_hms_opt(0, 0, 0)
+                return yesterday
+                    .and_hms_opt(0, 0, 0)
                     .map(|dt| Utc.from_utc_datetime(&dt));
             }
             _ => {}
@@ -133,17 +130,17 @@ impl ClawprintMcp {
         // Handle "N hours ago", "N days ago" etc.
         if s.ends_with(" ago") {
             let parts: Vec<&str> = s.trim_end_matches(" ago").split_whitespace().collect();
-            if parts.len() == 2 {
-                if let Ok(n) = parts[0].parse::<i64>() {
-                    let duration = match parts[1] {
-                        "hour" | "hours" | "h" => Some(chrono::Duration::hours(n)),
-                        "day" | "days" | "d" => Some(chrono::Duration::days(n)),
-                        "minute" | "minutes" | "min" | "m" => Some(chrono::Duration::minutes(n)),
-                        _ => None,
-                    };
-                    if let Some(d) = duration {
-                        return Some(now - d);
-                    }
+            if parts.len() == 2
+                && let Ok(n) = parts[0].parse::<i64>()
+            {
+                let duration = match parts[1] {
+                    "hour" | "hours" | "h" => Some(chrono::Duration::hours(n)),
+                    "day" | "days" | "d" => Some(chrono::Duration::days(n)),
+                    "minute" | "minutes" | "min" | "m" => Some(chrono::Duration::minutes(n)),
+                    _ => None,
+                };
+                if let Some(d) = duration {
+                    return Some(now - d);
                 }
             }
         }
@@ -155,7 +152,8 @@ impl ClawprintMcp {
 
         // Try date only (YYYY-MM-DD)
         if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-            return date.and_hms_opt(0, 0, 0)
+            return date
+                .and_hms_opt(0, 0, 0)
                 .map(|dt| Utc.from_utc_datetime(&dt));
         }
 
@@ -173,24 +171,33 @@ fn err_result(msg: String) -> Result<CallToolResult, McpError> {
 
 #[tool_router]
 impl ClawprintMcp {
-    #[tool(description = "Get Clawprint recording status: total events, last event time, ledger size, and daemon info")]
+    #[tool(
+        description = "Get Clawprint recording status: total events, last event time, ledger size, and daemon info"
+    )]
     async fn clawprint_status(&self) -> Result<CallToolResult, McpError> {
         let ledger = self.open_ledger()?;
 
         let total = ledger.total_events();
-        let last_time = ledger.last_event_time()
+        let last_time = ledger
+            .last_event_time()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let size = ledger.storage_size_bytes()
+        let size = ledger
+            .storage_size_bytes()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let daemon_started = ledger.get_meta("daemon_started_at")
+        let daemon_started = ledger
+            .get_meta("daemon_started_at")
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let gateway_url = ledger.get_meta("gateway_url")
+        let gateway_url = ledger
+            .get_meta("gateway_url")
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let mut out = format!("Clawprint Ledger Status\n");
+        let mut out = "Clawprint Ledger Status\n".to_string();
         out.push_str(&format!("  Total events: {}\n", total));
         if let Some(lt) = last_time {
-            out.push_str(&format!("  Last event:   {}\n", lt.format("%Y-%m-%d %H:%M:%S UTC")));
+            out.push_str(&format!(
+                "  Last event:   {}\n",
+                lt.format("%Y-%m-%d %H:%M:%S UTC")
+            ));
         }
         out.push_str(&format!("  Ledger size:  {}\n", format_bytes(size)));
         if let Some(gw) = gateway_url {
@@ -201,15 +208,21 @@ impl ClawprintMcp {
         }
 
         // Hash chain status
-        let (valid, checked) = ledger.verify_chain()
+        let (valid, checked) = ledger
+            .verify_chain()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        out.push_str(&format!("  Integrity:    {} ({} events checked)\n",
-            if valid { "VALID" } else { "TAMPERED" }, checked));
+        out.push_str(&format!(
+            "  Integrity:    {} ({} events checked)\n",
+            if valid { "VALID" } else { "TAMPERED" },
+            checked
+        ));
 
         text_result(out)
     }
 
-    #[tool(description = "List agent conversation runs. Returns run IDs with duration, event count, and tool call count. Use 'since' for time filtering (e.g. 'today', '3 hours ago', '2026-01-31')")]
+    #[tool(
+        description = "List agent conversation runs. Returns run IDs with duration, event count, and tool call count. Use 'since' for time filtering (e.g. 'today', '3 hours ago', '2026-01-31')"
+    )]
     async fn clawprint_list_runs(
         &self,
         Parameters(params): Parameters<ListRunsParams>,
@@ -220,7 +233,8 @@ impl ClawprintMcp {
         let until = params.until.as_deref().and_then(Self::parse_datetime);
         let limit = params.limit.unwrap_or(20) as usize;
 
-        let runs = ledger.list_agent_runs(since, until, limit)
+        let runs = ledger
+            .list_agent_runs(since, until, limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if runs.is_empty() {
@@ -234,9 +248,11 @@ impl ClawprintMcp {
             let dur_str = format_duration(duration.num_seconds());
 
             out.push_str(&format!("Run: {}\n", run.agent_run_id));
-            out.push_str(&format!("  Time:       {} to {}\n",
+            out.push_str(&format!(
+                "  Time:       {} to {}\n",
                 run.first_event.format("%Y-%m-%d %H:%M:%S"),
-                run.last_event.format("%H:%M:%S")));
+                run.last_event.format("%H:%M:%S")
+            ));
             out.push_str(&format!("  Duration:   {}\n", dur_str));
             out.push_str(&format!("  Events:     {}\n", run.event_count));
             out.push_str(&format!("  Tool calls: {}\n", run.tool_call_count));
@@ -246,7 +262,9 @@ impl ClawprintMcp {
         text_result(out)
     }
 
-    #[tool(description = "Get full transcript of an agent conversation run. Use run_id='latest' for the most recent conversation")]
+    #[tool(
+        description = "Get full transcript of an agent conversation run. Use run_id='latest' for the most recent conversation"
+    )]
     async fn clawprint_get_run(
         &self,
         Parameters(params): Parameters<GetRunParams>,
@@ -254,14 +272,16 @@ impl ClawprintMcp {
         let ledger = self.open_ledger()?;
 
         let run_id = if params.run_id == "latest" {
-            ledger.latest_agent_run()
+            ledger
+                .latest_agent_run()
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?
                 .ok_or_else(|| McpError::internal_error("No agent runs found".to_string(), None))?
         } else {
             params.run_id
         };
 
-        let events = ledger.get_agent_run_events(&run_id)
+        let events = ledger
+            .get_agent_run_events(&run_id)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if events.is_empty() {
@@ -278,39 +298,50 @@ impl ClawprintMcp {
         for event in &events {
             match event.kind {
                 crate::EventKind::AgentEvent => {
-                    let is_tool_use = event.payload.pointer("/data/type")
+                    let is_tool_use = event
+                        .payload
+                        .pointer("/data/type")
                         .and_then(|v| v.as_str())
                         .map(|t| t == "tool_use")
                         .unwrap_or(false);
 
                     if is_tool_use {
-                        let tool = event.payload.pointer("/data/tool")
+                        let tool = event
+                            .payload
+                            .pointer("/data/tool")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        let args = event.payload.pointer("/data/args")
+                        let args = event
+                            .payload
+                            .pointer("/data/args")
                             .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
                             .unwrap_or_default();
-                        tool_calls.push(format!("[{}] {} {}\n  {}\n",
+                        tool_calls.push(format!(
+                            "[{}] {} {}\n  {}\n",
                             event.ts.format("%H:%M:%S"),
                             tool,
                             "",
-                            truncate(&args, 500)));
+                            truncate(&args, 500)
+                        ));
                     }
                 }
                 crate::EventKind::OutputChunk => {
                     // Check for final state chunk
-                    let is_final = event.payload.pointer("/data/state")
+                    let is_final = event
+                        .payload
+                        .pointer("/data/state")
                         .and_then(|v| v.as_str())
                         .map(|s| s == "final")
                         .unwrap_or(false);
 
-                    if is_final {
-                        if let Some(text) = event.payload.pointer("/data/text")
+                    if is_final
+                        && let Some(text) = event
+                            .payload
+                            .pointer("/data/text")
                             .or_else(|| event.payload.pointer("/data/content"))
                             .and_then(|v| v.as_str())
-                        {
-                            chat_output = text.to_string();
-                        }
+                    {
+                        chat_output = text.to_string();
                     }
                 }
                 _ => {}
@@ -334,7 +365,9 @@ impl ClawprintMcp {
         text_result(out)
     }
 
-    #[tool(description = "Search events by text query across all recorded history. Searches inside event payloads. Supports time and kind filtering")]
+    #[tool(
+        description = "Search events by text query across all recorded history. Searches inside event payloads. Supports time and kind filtering"
+    )]
     async fn clawprint_search(
         &self,
         Parameters(params): Parameters<SearchParams>,
@@ -344,19 +377,19 @@ impl ClawprintMcp {
         let since = params.since.as_deref().and_then(Self::parse_datetime);
         let until = params.until.as_deref().and_then(Self::parse_datetime);
 
-        let events = ledger.search_events(
-            &params.query,
-            params.kind.as_deref(),
-            since,
-            until,
-            50,
-        ).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let events = ledger
+            .search_events(&params.query, params.kind.as_deref(), since, until, 50)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if events.is_empty() {
             return text_result(format!("No events found matching '{}'", params.query));
         }
 
-        let mut out = format!("Search Results for '{}' ({} matches)\n\n", params.query, events.len());
+        let mut out = format!(
+            "Search Results for '{}' ({} matches)\n\n",
+            params.query,
+            events.len()
+        );
 
         for event in &events {
             let kind_str = serde_json::to_string(&event.kind)
@@ -364,10 +397,12 @@ impl ClawprintMcp {
                 .trim_matches('"')
                 .to_owned();
 
-            out.push_str(&format!("[{}] {} (event #{})\n",
+            out.push_str(&format!(
+                "[{}] {} (event #{})\n",
                 event.ts.format("%Y-%m-%d %H:%M:%S"),
                 kind_str,
-                event.event_id.0));
+                event.event_id.0
+            ));
 
             // Show relevant payload excerpt
             let payload_str = serde_json::to_string_pretty(&event.payload).unwrap_or_default();
@@ -377,7 +412,9 @@ impl ClawprintMcp {
         text_result(out)
     }
 
-    #[tool(description = "List tool calls the agent made. Shows tool name, arguments, and timestamp. Filter by run, time range, or tool name")]
+    #[tool(
+        description = "List tool calls the agent made. Shows tool name, arguments, and timestamp. Filter by run, time range, or tool name"
+    )]
     async fn clawprint_tool_calls(
         &self,
         Parameters(params): Parameters<ToolCallsParams>,
@@ -386,11 +423,9 @@ impl ClawprintMcp {
 
         let since = params.since.as_deref().and_then(Self::parse_datetime);
 
-        let calls = ledger.tool_calls(
-            params.run_id.as_deref(),
-            since,
-            params.tool_name.as_deref(),
-        ).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let calls = ledger
+            .tool_calls(params.run_id.as_deref(), since, params.tool_name.as_deref())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if calls.is_empty() {
             return text_result("No tool calls found matching the filters.".to_string());
@@ -400,9 +435,11 @@ impl ClawprintMcp {
 
         for call in &calls {
             let args_str = serde_json::to_string(&call.args).unwrap_or_default();
-            out.push_str(&format!("[{}] {}\n",
+            out.push_str(&format!(
+                "[{}] {}\n",
                 call.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                call.tool));
+                call.tool
+            ));
             if let Some(ref ar) = call.agent_run {
                 out.push_str(&format!("  Run: {}\n", ar));
             }
@@ -412,7 +449,9 @@ impl ClawprintMcp {
         text_result(out)
     }
 
-    #[tool(description = "Security audit: scan recorded events for destructive operations, prompt injection attempts, privilege escalation, suspicious external access, and anomalies")]
+    #[tool(
+        description = "Security audit: scan recorded events for destructive operations, prompt injection attempts, privilege escalation, suspicious external access, and anomalies"
+    )]
     async fn clawprint_security_check(
         &self,
         Parameters(params): Parameters<SecurityCheckParams>,
@@ -421,11 +460,13 @@ impl ClawprintMcp {
 
         // Get events to scan
         let events = if let Some(ref run_id) = params.run_id {
-            ledger.get_agent_run_events(run_id)
+            ledger
+                .get_agent_run_events(run_id)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?
         } else {
             let since = params.since.as_deref().and_then(Self::parse_datetime);
-            ledger.search_events("", None, since, None, 10000)
+            ledger
+                .search_events("", None, since, None, 10000)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?
         };
 
@@ -437,28 +478,39 @@ impl ClawprintMcp {
         text_result(report.to_text())
     }
 
-    #[tool(description = "Verify hash chain integrity of the Clawprint recording ledger. Detects any tampering or corruption")]
+    #[tool(
+        description = "Verify hash chain integrity of the Clawprint recording ledger. Detects any tampering or corruption"
+    )]
     async fn clawprint_verify(&self) -> Result<CallToolResult, McpError> {
         let ledger = self.open_ledger()?;
 
-        let (valid, count) = ledger.verify_chain()
+        let (valid, count) = ledger
+            .verify_chain()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         let mut out = String::new();
         if valid {
-            out.push_str(&format!("VALID — Hash chain integrity verified for {} events.\n", count));
+            out.push_str(&format!(
+                "VALID — Hash chain integrity verified for {} events.\n",
+                count
+            ));
             if let Some(hash) = ledger.root_hash() {
                 out.push_str(&format!("Root hash: {}\n", hash));
             }
         } else {
-            out.push_str(&format!("TAMPERED — Hash chain verification FAILED ({} events checked).\n", count));
+            out.push_str(&format!(
+                "TAMPERED — Hash chain verification FAILED ({} events checked).\n",
+                count
+            ));
             out.push_str("The recording may have been modified after it was written.\n");
         }
 
         text_result(out)
     }
 
-    #[tool(description = "Get event statistics: breakdown by type, events per minute timeline, storage size. Use 'since' for time filtering")]
+    #[tool(
+        description = "Get event statistics: breakdown by type, events per minute timeline, storage size. Use 'since' for time filtering"
+    )]
     async fn clawprint_stats(
         &self,
         Parameters(params): Parameters<StatsParams>,
@@ -467,11 +519,14 @@ impl ClawprintMcp {
 
         let since = params.since.as_deref().and_then(Self::parse_datetime);
 
-        let breakdown = ledger.event_count_by_kind()
+        let breakdown = ledger
+            .event_count_by_kind()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let timeline = ledger.events_timeline(since)
+        let timeline = ledger
+            .events_timeline(since)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let size = ledger.storage_size_bytes()
+        let size = ledger
+            .storage_size_bytes()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let total = ledger.total_events();
 
@@ -505,9 +560,7 @@ impl ServerHandler for ClawprintMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
                 "Clawprint is a flight recorder for OpenClaw AI agent runs. \

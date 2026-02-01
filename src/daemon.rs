@@ -13,10 +13,10 @@ use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::{
+    Config, EventId, RunId,
     gateway::{GatewayClient, GatewayEvent},
     ledger::Ledger,
     record::gateway_event_to_event,
-    Config, EventId, RunId,
 };
 
 /// Run the daemon: connect to gateway, record to ledger, auto-reconnect.
@@ -42,7 +42,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .unwrap()
+            .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
     pb.set_message("Connecting to gateway...");
@@ -71,7 +71,9 @@ pub async fn run_daemon(config: Config) -> Result<()> {
             ledger.clone(),
             &pb,
             &shutdown,
-        ).await {
+        )
+        .await
+        {
             Ok(ShutdownReason::Signal) => {
                 break;
             }
@@ -79,7 +81,10 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                 // Connection was established then lost — reset backoff
                 backoff = Duration::from_secs(1);
                 warn!("Gateway disconnected, reconnecting in {:?}...", backoff);
-                pb.set_message(format!("Disconnected. Reconnecting in {}s...", backoff.as_secs()));
+                pb.set_message(format!(
+                    "Disconnected. Reconnecting in {}s...",
+                    backoff.as_secs()
+                ));
 
                 // Wait for backoff duration, but check shutdown periodically
                 let sleep_until = tokio::time::Instant::now() + backoff;
@@ -87,7 +92,8 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                     if shutdown.load(Ordering::SeqCst) {
                         break;
                     }
-                    let remaining = sleep_until.saturating_duration_since(tokio::time::Instant::now());
+                    let remaining =
+                        sleep_until.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
                         break;
                     }
@@ -110,7 +116,8 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                     if shutdown.load(Ordering::SeqCst) {
                         break;
                     }
-                    let remaining = sleep_until.saturating_duration_since(tokio::time::Instant::now());
+                    let remaining =
+                        sleep_until.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
                         break;
                     }

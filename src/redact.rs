@@ -36,7 +36,7 @@ lazy_static::lazy_static! {
     static ref JWT_PATTERN: Regex = Regex::new(
         r"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"
     ).unwrap();
-    
+
     static ref API_KEY_PATTERNS: Vec<Regex> = vec![
         // AWS Access Key IDs
         Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
@@ -77,25 +77,27 @@ pub fn redact_json(value: &mut Value) {
 /// Redacts secrets from a string
 pub fn redact_string(s: &str) -> String {
     let mut result = s.to_string();
-    
+
     // Redact JWTs
-    result = JWT_PATTERN.replace_all(&result, "[REDACTED-JWT]").to_string();
-    
+    result = JWT_PATTERN
+        .replace_all(&result, "[REDACTED-JWT]")
+        .to_string();
+
     // Redact API keys
     for pattern in API_KEY_PATTERNS.iter() {
         result = pattern.replace_all(&result, "[REDACTED-KEY]").to_string();
     }
-    
+
     // Redact Bearer tokens
     if result.to_lowercase().starts_with("bearer ") {
         result = "Bearer [REDACTED]".to_string();
     }
-    
+
     // Redact Basic auth
     if result.to_lowercase().starts_with("basic ") {
         result = "Basic [REDACTED]".to_string();
     }
-    
+
     result
 }
 
@@ -108,13 +110,13 @@ pub fn redact_bytes(data: &[u8]) -> Vec<u8> {
             return redacted;
         }
     }
-    
+
     // Try to parse as string
     if let Ok(s) = std::str::from_utf8(data) {
         let redacted = redact_string(s);
         return redacted.into_bytes();
     }
-    
+
     // Binary data - return as-is
     data.to_vec()
 }
@@ -154,7 +156,11 @@ mod tests {
     fn test_redact_string_jwt() {
         let s = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123";
         let redacted = redact_string(s);
-        assert!(redacted.contains("[REDACTED-JWT]"), "JWT should be redacted, got: {}", redacted);
+        assert!(
+            redacted.contains("[REDACTED-JWT]"),
+            "JWT should be redacted, got: {}",
+            redacted
+        );
     }
 
     #[test]
@@ -175,7 +181,11 @@ mod tests {
     fn test_redact_aws_key() {
         let s = "my key is AKIAIOSFODNN7EXAMPLE";
         let redacted = redact_string(s);
-        assert!(redacted.contains("[REDACTED-KEY]"), "AWS key should be redacted, got: {}", redacted);
+        assert!(
+            redacted.contains("[REDACTED-KEY]"),
+            "AWS key should be redacted, got: {}",
+            redacted
+        );
     }
 
     #[test]
@@ -183,7 +193,11 @@ mod tests {
         // GitHub PATs are ghp_ followed by 36 alphanumeric chars
         let s = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
         let redacted = redact_string(s);
-        assert!(redacted.contains("[REDACTED-KEY]"), "GitHub PAT should be redacted, got: {}", redacted);
+        assert!(
+            redacted.contains("[REDACTED-KEY]"),
+            "GitHub PAT should be redacted, got: {}",
+            redacted
+        );
     }
 
     /// SHA-256 hashes must NOT be redacted (was broken by old [a-f0-9]{32,} pattern)
@@ -248,6 +262,9 @@ mod tests {
     fn test_redact_bytes_binary_passthrough() {
         let binary = vec![0xFF, 0xFE, 0x00, 0x01];
         let redacted = redact_bytes(&binary);
-        assert_eq!(redacted, binary, "Binary data should pass through unchanged");
+        assert_eq!(
+            redacted, binary,
+            "Binary data should pass through unchanged"
+        );
     }
 }

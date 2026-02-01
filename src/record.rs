@@ -4,18 +4,18 @@
 
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    gateway::{GatewayClient, GatewayEvent},
-    storage::RunStorage,
-    redact::redact_json,
     Config, Event, EventId, EventKind, RunId, RunMeta,
+    gateway::{GatewayClient, GatewayEvent},
+    redact::redact_json,
+    storage::RunStorage,
 };
 
 /// Summary returned after a recording session ends.
@@ -45,11 +45,7 @@ impl RecordingSession {
 
         info!("Starting recording session: {}", run_id.0);
 
-        let storage = RunStorage::new(
-            run_id.clone(),
-            &config.output_dir,
-            config.batch_size,
-        )?;
+        let storage = RunStorage::new(run_id.clone(), &config.output_dir, config.batch_size)?;
 
         let storage = Arc::new(Mutex::new(storage));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -59,12 +55,9 @@ impl RecordingSession {
         let storage_clone = storage.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = recording_loop(
-                run_id_clone,
-                config_clone,
-                storage_clone,
-                shutdown_rx,
-            ).await {
+            if let Err(e) =
+                recording_loop(run_id_clone, config_clone, storage_clone, shutdown_rx).await
+            {
                 error!("Recording loop failed: {}", e);
             }
         });
@@ -94,7 +87,8 @@ impl RecordingSession {
         let mut storage = self.storage.lock().await;
         let root_hash = storage.root_hash().unwrap_or_default();
 
-        let started_at = storage.load_events(Some(1))?
+        let started_at = storage
+            .load_events(Some(1))?
             .first()
             .map(|e| e.ts)
             .unwrap_or_else(chrono::Utc::now);
@@ -177,7 +171,7 @@ async fn recording_loop(
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .unwrap()
+            .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
 

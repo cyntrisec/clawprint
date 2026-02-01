@@ -4,12 +4,12 @@
 //! Produces rich transcripts with event breakdowns, agent run sections,
 //! timestamps, and chat reconstruction from OUTPUT_CHUNK deltas.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{info, warn};
 
-use crate::storage::{verify_event_chain, RunStorage};
+use crate::storage::{RunStorage, verify_event_chain};
 use crate::{Event, EventKind, RunId};
 
 /// Info about a single agent conversation run within the recording
@@ -91,11 +91,9 @@ pub fn replay_run(run_id: &RunId, base_path: &Path, offline: bool) -> Result<Rep
                         .and_then(|v| v.as_str())
                         .map(|t| t == "tool_use")
                         .unwrap_or(false);
-                    if is_tool_use {
-                    if let Some(tool) = event
-                        .payload
-                        .pointer("/data/tool")
-                        .and_then(|v| v.as_str())
+                    if is_tool_use
+                        && let Some(tool) =
+                            event.payload.pointer("/data/tool").and_then(|v| v.as_str())
                     {
                         let tc = ToolCallReplay {
                             tool: tool.to_string(),
@@ -109,7 +107,6 @@ pub fn replay_run(run_id: &RunId, base_path: &Path, offline: bool) -> Result<Rep
                         };
                         info.tool_calls.push(tc.clone());
                         result.tool_calls.push(tc);
-                    }
                     }
                 }
             }
@@ -134,10 +131,10 @@ pub fn replay_run(run_id: &RunId, base_path: &Path, offline: bool) -> Result<Rep
                 if let Some(text) = content {
                     result.outputs.push(text.clone());
                     // Also attach to agent run if we can identify it
-                    if let Some(ref arid) = agent_run_id {
-                        if let Some(info) = agent_runs.get_mut(arid) {
-                            info.chat_output = text;
-                        }
+                    if let Some(ref arid) = agent_run_id
+                        && let Some(info) = agent_runs.get_mut(arid)
+                    {
+                        info.chat_output = text;
                     }
                 }
             }
@@ -242,20 +239,14 @@ pub fn generate_transcript(result: &ReplayResult) -> String {
     let mut t = String::new();
 
     // Header
-    t.push_str(&format!(
-        "# Clawprint Replay — {}\n\n",
-        result.run_id.0
-    ));
+    t.push_str(&format!("# Clawprint Replay — {}\n\n", result.run_id.0));
 
     // Summary
     if let (Some(start), Some(end)) = (result.started_at, result.ended_at) {
         let dur = end.signed_duration_since(start);
         let mins = dur.num_minutes();
         let secs = dur.num_seconds() % 60;
-        t.push_str(&format!(
-            "**Duration:** {}m {}s  \n",
-            mins, secs
-        ));
+        t.push_str(&format!("**Duration:** {}m {}s  \n", mins, secs));
         t.push_str(&format!(
             "**Period:** {} → {}  \n",
             start.format("%Y-%m-%d %H:%M:%S UTC"),
@@ -264,10 +255,7 @@ pub fn generate_transcript(result: &ReplayResult) -> String {
     }
 
     t.push_str(&format!("**Events:** {}  \n", result.event_count));
-    t.push_str(&format!(
-        "**Tool Calls:** {}  \n",
-        result.tool_calls.len()
-    ));
+    t.push_str(&format!("**Tool Calls:** {}  \n", result.tool_calls.len()));
     t.push_str(&format!(
         "**Agent Runs:** {}  \n\n",
         result.agent_runs.len()
@@ -299,11 +287,7 @@ pub fn generate_transcript(result: &ReplayResult) -> String {
                 &run.run_id
             };
 
-            t.push_str(&format!(
-                "### Run {} — `{}`\n\n",
-                i + 1,
-                id_short
-            ));
+            t.push_str(&format!("### Run {} — `{}`\n\n", i + 1, id_short));
 
             if let (Some(start), Some(end)) = (run.start_time, run.end_time) {
                 let dur = end.signed_duration_since(start);
@@ -316,10 +300,7 @@ pub fn generate_transcript(result: &ReplayResult) -> String {
             }
 
             t.push_str(&format!("- **Events:** {}  \n", run.event_count));
-            t.push_str(&format!(
-                "- **Tool Calls:** {}  \n",
-                run.tool_calls.len()
-            ));
+            t.push_str(&format!("- **Tool Calls:** {}  \n", run.tool_calls.len()));
 
             // Tool calls within this agent run
             if !run.tool_calls.is_empty() {
@@ -364,12 +345,7 @@ pub fn generate_transcript(result: &ReplayResult) -> String {
                 .map(|ts| ts.format("%H:%M:%S").to_string())
                 .unwrap_or_else(|| "??:??:??".to_string());
 
-            t.push_str(&format!(
-                "### {} `[{}]` {}\n",
-                i + 1,
-                ts_str,
-                call.tool
-            ));
+            t.push_str(&format!("### {} `[{}]` {}\n", i + 1, ts_str, call.tool));
             t.push_str(&format!(
                 "```json\n{}\n```\n\n",
                 serde_json::to_string_pretty(&call.args).unwrap_or_default()

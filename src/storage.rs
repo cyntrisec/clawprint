@@ -3,9 +3,9 @@
 //! Uses SQLite for events + filesystem for compressed artifacts.
 //! Implements hash chain verification.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -59,10 +59,7 @@ impl RunStorage {
             "CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind)",
             [],
         )?;
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)",
-            [],
-        )?;
+        db.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)", [])?;
 
         info!("Created storage for run {} at {:?}", run_id.0, run_path);
 
@@ -81,13 +78,13 @@ impl RunStorage {
     pub fn open(run_id: RunId, base_path: &Path) -> Result<Self> {
         let run_path = base_path.join("runs").join(&run_id.0);
         let db_path = run_path.join("ledger.sqlite");
-        
+
         if !db_path.exists() {
             return Err(anyhow!("Run {} not found at {:?}", run_id.0, run_path));
         }
 
         let db = Connection::open(&db_path)?;
-        
+
         // Get last hash for chain continuation
         let last_hash: Option<String> = db
             .query_row(
@@ -97,13 +94,12 @@ impl RunStorage {
             )
             .optional()?;
 
-        let event_count: u64 = db.query_row(
-            "SELECT COUNT(*) FROM events",
-            [],
-            |row| row.get(0),
-        )?;
+        let event_count: u64 = db.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
 
-        info!("Opened storage for run {} ({} events)", run_id.0, event_count);
+        info!(
+            "Opened storage for run {} ({} events)",
+            run_id.0, event_count
+        );
 
         Ok(Self {
             run_id,
@@ -119,7 +115,9 @@ impl RunStorage {
     /// Write event to storage, chaining it to the previous event's hash
     pub fn write_event(&mut self, mut event: Event) -> Result<()> {
         // Determine the previous hash: from the last buffered event, or from storage
-        let prev_hash = self.batch_buffer.last()
+        let prev_hash = self
+            .batch_buffer
+            .last()
             .map(|e| e.hash_self.clone())
             .or_else(|| self.last_hash.clone());
 
@@ -143,7 +141,7 @@ impl RunStorage {
         }
 
         let tx = self.db.transaction()?;
-        
+
         for event in &self.batch_buffer {
             let kind_str = serde_json::to_string(&event.kind)
                 .unwrap_or_default()
@@ -174,8 +172,11 @@ impl RunStorage {
         tx.commit()?;
         self.batch_buffer.clear();
 
-        debug!("Flushed {} events to storage (total: {})", flushed, self.event_count);
-        
+        debug!(
+            "Flushed {} events to storage (total: {})",
+            flushed, self.event_count
+        );
+
         Ok(())
     }
 
@@ -186,7 +187,7 @@ impl RunStorage {
         }
 
         // Compute hash
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let hash = {
             let mut hasher = Sha256::new();
             hasher.update(data);
@@ -209,8 +210,12 @@ impl RunStorage {
         let mut file = fs::File::create(&artifact_path)?;
         file.write_all(&compressed)?;
 
-        debug!("Stored artifact {} ({} bytes -> {} bytes)", 
-               hash, data.len(), compressed.len());
+        debug!(
+            "Stored artifact {} ({} bytes -> {} bytes)",
+            hash,
+            data.len(),
+            compressed.len()
+        );
 
         Ok(hash)
     }
@@ -222,7 +227,8 @@ impl RunStorage {
         }
 
         let prefix = &hash[..2];
-        let artifact_path = self.base_path
+        let artifact_path = self
+            .base_path
             .join("artifacts")
             .join(prefix)
             .join(format!("{}.zst", hash));
@@ -235,7 +241,7 @@ impl RunStorage {
         let data = zstd::decode_all(&compressed[..])?;
 
         // Verify integrity: recompute hash and compare
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let actual_hash = {
             let mut hasher = Sha256::new();
             hasher.update(&data);
@@ -244,7 +250,8 @@ impl RunStorage {
         if actual_hash != hash {
             return Err(anyhow!(
                 "Artifact integrity check failed: expected {} got {}",
-                hash, actual_hash
+                hash,
+                actual_hash
             ));
         }
 
@@ -256,16 +263,15 @@ impl RunStorage {
         let mut stmt = self.db.prepare(
             "SELECT event_id, ts, kind, span_id, parent_span_id, actor,
                     payload, artifact_refs, hash_prev, hash_self
-             FROM events ORDER BY event_id"
+             FROM events ORDER BY event_id",
         )?;
 
         let limit = limit.unwrap_or(usize::MAX);
         let run_id = self.run_id.clone();
-        let events = stmt.query_map([], |row| {
-            Self::row_to_event(row, &run_id)
-        })?
-        .take(limit)
-        .collect::<Result<Vec<_>, _>>()?;
+        let events = stmt
+            .query_map([], |row| Self::row_to_event(row, &run_id))?
+            .take(limit)
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(events)
     }
@@ -289,13 +295,13 @@ impl RunStorage {
     /// Finalize run and write meta.json
     pub fn finalize(&mut self, meta: &RunMeta) -> Result<()> {
         self.flush()?;
-        
+
         let meta_path = self.base_path.join("meta.json");
         let meta_json = serde_json::to_string_pretty(meta)?;
         fs::write(&meta_path, meta_json)?;
-        
+
         info!("Finalized run {} at {:?}", self.run_id.0, meta_path);
-        
+
         Ok(())
     }
 
@@ -305,9 +311,9 @@ impl RunStorage {
 
     /// Get event count grouped by kind
     pub fn event_count_by_kind(&self) -> Result<HashMap<String, u64>> {
-        let mut stmt = self.db.prepare(
-            "SELECT kind, COUNT(*) FROM events GROUP BY kind ORDER BY COUNT(*) DESC"
-        )?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT kind, COUNT(*) FROM events GROUP BY kind ORDER BY COUNT(*) DESC")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?;
@@ -331,21 +337,21 @@ impl RunStorage {
         let mut where_clauses = Vec::new();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-        if let Some(kinds) = kind_filter {
-            if !kinds.is_empty() {
-                let placeholders: Vec<&str> = kinds.iter().map(|_| "?").collect();
-                where_clauses.push(format!("kind IN ({})", placeholders.join(",")));
-                for k in kinds {
-                    param_values.push(Box::new(k.to_string()));
-                }
+        if let Some(kinds) = kind_filter
+            && !kinds.is_empty()
+        {
+            let placeholders: Vec<&str> = kinds.iter().map(|_| "?").collect();
+            where_clauses.push(format!("kind IN ({})", placeholders.join(",")));
+            for k in kinds {
+                param_values.push(Box::new(k.to_string()));
             }
         }
 
-        if let Some(term) = search {
-            if !term.is_empty() {
-                where_clauses.push("payload LIKE ?".to_string());
-                param_values.push(Box::new(format!("%{}%", term)));
-            }
+        if let Some(term) = search
+            && !term.is_empty()
+        {
+            where_clauses.push("payload LIKE ?".to_string());
+            param_values.push(Box::new(format!("%{}%", term)));
         }
 
         let where_sql = if where_clauses.is_empty() {
@@ -356,8 +362,11 @@ impl RunStorage {
 
         // Get total count
         let count_sql = format!("SELECT COUNT(*) FROM events {}", where_sql);
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let total: u64 = self.db.query_row(&count_sql, params_ref.as_slice(), |row| row.get(0))?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let total: u64 = self
+            .db
+            .query_row(&count_sql, params_ref.as_slice(), |row| row.get(0))?;
 
         // Get paginated events
         let select_sql = format!(
@@ -373,22 +382,22 @@ impl RunStorage {
                 all_params.push(Box::new(k.to_string()));
             }
         }
-        if let Some(term) = search {
-            if !term.is_empty() {
-                all_params.push(Box::new(format!("%{}%", term)));
-            }
+        if let Some(term) = search
+            && !term.is_empty()
+        {
+            all_params.push(Box::new(format!("%{}%", term)));
         }
         all_params.push(Box::new(limit as i64));
         all_params.push(Box::new(offset as i64));
 
-        let all_ref: Vec<&dyn rusqlite::types::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+        let all_ref: Vec<&dyn rusqlite::types::ToSql> =
+            all_params.iter().map(|p| p.as_ref()).collect();
         let run_id = self.run_id.clone();
 
         let mut stmt = self.db.prepare(&select_sql)?;
-        let events = stmt.query_map(all_ref.as_slice(), |row| {
-            Self::row_to_event(row, &run_id)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        let events = stmt
+            .query_map(all_ref.as_slice(), |row| Self::row_to_event(row, &run_id))?
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok((events, total))
     }
@@ -397,7 +406,7 @@ impl RunStorage {
     pub fn events_timeline(&self) -> Result<Vec<(String, u64)>> {
         let mut stmt = self.db.prepare(
             "SELECT substr(ts, 12, 5) as minute, COUNT(*)
-             FROM events GROUP BY minute ORDER BY minute"
+             FROM events GROUP BY minute ORDER BY minute",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
@@ -410,7 +419,7 @@ impl RunStorage {
         let mut stmt = self.db.prepare(
             "SELECT DISTINCT json_extract(payload, '$.data.runId')
              FROM events
-             WHERE json_extract(payload, '$.data.runId') IS NOT NULL"
+             WHERE json_extract(payload, '$.data.runId') IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -441,9 +450,13 @@ impl RunStorage {
         let hash_self: String = row.get(9)?;
 
         let ts = DateTime::parse_from_rfc3339(&ts_str)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                1, rusqlite::types::Type::Text, Box::new(e),
-            ))?
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?
             .with_timezone(&Utc);
 
         let kind = match kind_str.as_str() {
@@ -459,20 +472,25 @@ impl RunStorage {
             _ => EventKind::Custom,
         };
 
-        let payload: serde_json::Value = serde_json::from_str(&payload_str)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                6, rusqlite::types::Type::Text, Box::new(e),
-            ))?;
-        let artifact_refs: Vec<String> = serde_json::from_str(&artifact_refs_str)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                7, rusqlite::types::Type::Text, Box::new(e),
-            ))?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        let artifact_refs: Vec<String> = serde_json::from_str(&artifact_refs_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+        })?;
 
         Ok(Event {
             run_id: run_id.clone(),
             event_id: EventId(event_id as u64),
-            ts, kind, span_id, parent_span_id, actor,
-            payload, artifact_refs, hash_prev, hash_self,
+            ts,
+            kind,
+            span_id,
+            parent_span_id,
+            actor,
+            payload,
+            artifact_refs,
+            hash_prev,
+            hash_self,
         })
     }
 }
@@ -485,11 +503,11 @@ pub fn list_runs(base_path: &Path) -> Result<Vec<(RunId, RunMeta)>> {
     }
 
     let mut runs = Vec::new();
-    
+
     for entry in fs::read_dir(&runs_dir)? {
         let entry = entry?;
         let meta_path = entry.path().join("meta.json");
-        
+
         if meta_path.exists() {
             let meta_json = fs::read_to_string(&meta_path)?;
             if let Ok(meta) = serde_json::from_str::<RunMeta>(&meta_json) {
@@ -500,7 +518,7 @@ pub fn list_runs(base_path: &Path) -> Result<Vec<(RunId, RunMeta)>> {
 
     // Sort by start time descending
     runs.sort_by(|a, b| b.1.started_at.cmp(&a.1.started_at));
-    
+
     Ok(runs)
 }
 
@@ -517,10 +535,10 @@ pub fn resolve_run_id(prefix: &str, base_path: &Path) -> Result<RunId> {
     let mut matches = Vec::new();
     for entry in fs::read_dir(&runs_dir)? {
         let entry = entry?;
-        if let Some(name) = entry.file_name().to_str() {
-            if name.starts_with(prefix) {
-                matches.push(name.to_string());
-            }
+        if let Some(name) = entry.file_name().to_str()
+            && name.starts_with(prefix)
+        {
+            matches.push(name.to_string());
         }
     }
 
@@ -528,10 +546,15 @@ pub fn resolve_run_id(prefix: &str, base_path: &Path) -> Result<RunId> {
         0 => Err(anyhow!("No run found matching prefix '{}'", prefix)),
         1 => Ok(RunId(matches.into_iter().next().unwrap())),
         n => {
-            let previews: Vec<String> = matches.iter().map(|m| m[..8.min(m.len())].to_string()).collect();
+            let previews: Vec<String> = matches
+                .iter()
+                .map(|m| m[..8.min(m.len())].to_string())
+                .collect();
             Err(anyhow!(
                 "Prefix '{}' is ambiguous — matches {} runs: {}",
-                prefix, n, previews.join(", ")
+                prefix,
+                n,
+                previews.join(", ")
             ))
         }
     }
@@ -628,7 +651,7 @@ mod tests {
         let run_id = RunId::new();
         let mut storage = RunStorage::new(run_id.clone(), temp_dir.path(), 100).unwrap();
 
-        let kinds = vec![
+        let kinds = [
             EventKind::RunStart,
             EventKind::ToolCall,
             EventKind::ToolResult,
@@ -696,7 +719,8 @@ mod tests {
                 events[i].hash_prev.as_ref(),
                 Some(&events[i - 1].hash_self),
                 "Event {} should link to event {}",
-                i + 1, i
+                i + 1,
+                i
             );
         }
 
@@ -724,10 +748,13 @@ mod tests {
         storage.flush().unwrap();
 
         // Tamper with event 2's payload directly in the DB
-        storage.db.execute(
-            "UPDATE events SET payload = '{\"step\":999}' WHERE event_id = 2",
-            [],
-        ).unwrap();
+        storage
+            .db
+            .execute(
+                "UPDATE events SET payload = '{\"step\":999}' WHERE event_id = 2",
+                [],
+            )
+            .unwrap();
 
         // verify_chain should now fail
         assert!(!storage.verify_chain().unwrap());
@@ -784,7 +811,8 @@ mod tests {
 
         // Corrupt the artifact file
         let prefix = &hash[..2];
-        let artifact_path = storage.run_path()
+        let artifact_path = storage
+            .run_path()
             .join("artifacts")
             .join(prefix)
             .join(format!("{}.zst", hash));
@@ -795,7 +823,10 @@ mod tests {
         let result = storage.get_artifact(&hash);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("integrity check failed"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("integrity check failed"),
             "Should report integrity failure"
         );
     }

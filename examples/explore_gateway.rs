@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     let (mut write, mut read) = ws_stream.split();
 
     // Try different handshake messages
-    let handshakes = vec![
+    let handshakes = [
         json!({"type": "connect", "role": "observer", "version": "0.1.0"}),
         json!({"type": "hello", "role": "operator"}),
         json!({"action": "subscribe", "channel": "events"}),
@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
 
     for (i, handshake) in handshakes.iter().enumerate() {
         println!("--- Test {}: {} ---", i + 1, handshake["type"]);
-        
+
         let msg = Message::Text(handshake.to_string());
         write.send(msg).await?;
         println!("Sent: {}", handshake);
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         match timeout(Duration::from_secs(5), read.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 println!("Received: {}", text);
-                
+
                 // Try to pretty print if JSON
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                     println!("Parsed JSON:\n{}", serde_json::to_string_pretty(&json)?);
@@ -57,13 +57,12 @@ async fn main() -> anyhow::Result<()> {
     // Try to receive any spontaneous messages
     println!("--- Listening for spontaneous messages (10s) ---");
     let listen_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    
+
     while tokio::time::Instant::now() < listen_deadline {
-        match timeout(Duration::from_secs(1), read.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                println!("Spontaneous: {}", text);
-            }
-            _ => {}
+        if let Ok(Some(Ok(Message::Text(text)))) =
+            timeout(Duration::from_secs(1), read.next()).await
+        {
+            println!("Spontaneous: {}", text);
         }
     }
 

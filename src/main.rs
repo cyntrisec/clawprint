@@ -59,7 +59,8 @@ fn strip_ansi(s: &str) -> String {
 }
 
 fn parse_host(host: &str) -> Result<[u8; 4]> {
-    let addr: Ipv4Addr = host.parse()
+    let addr: Ipv4Addr = host
+        .parse()
         .map_err(|_| anyhow::anyhow!("Invalid host address: {}", host))?;
     Ok(addr.octets())
 }
@@ -98,17 +99,16 @@ fn print_banner(subtitle: &str) {
 use rmcp::ServiceExt as _;
 #[cfg(feature = "mcp")]
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpService, StreamableHttpServerConfig,
-    session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 
 use clawprint::{
+    Config,
     daemon::run_daemon,
     record::RecordingSession,
-    replay::{diff_runs, replay_run, generate_transcript},
-    storage::{list_runs_with_stats, resolve_run_id, RunStorage},
+    replay::{diff_runs, generate_transcript, replay_run},
+    storage::{RunStorage, list_runs_with_stats, resolve_run_id},
     viewer::start_viewer,
-    Config,
 };
 
 #[derive(Parser)]
@@ -306,7 +306,8 @@ fn discover_openclaw_token() -> Option<String> {
     let config_path = PathBuf::from(home).join(".openclaw").join("openclaw.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-    config.pointer("/gateway/auth/token")
+    config
+        .pointer("/gateway/auth/token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -327,10 +328,7 @@ async fn main() -> Result<()> {
     };
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| default_log.to_string()),
-        )
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| default_log.to_string()))
         .init();
 
     match cli.command {
@@ -347,18 +345,18 @@ async fn main() -> Result<()> {
                     info!("Using token from --token flag");
                     Some(t)
                 }
-                None => {
-                    match discover_openclaw_token() {
-                        Some(t) => {
-                            info!("Auto-discovered token from ~/.openclaw/openclaw.json");
-                            Some(t)
-                        }
-                        None => {
-                            warn!("No auth token found. Pass --token or configure gateway.auth.token in ~/.openclaw/openclaw.json");
-                            None
-                        }
+                None => match discover_openclaw_token() {
+                    Some(t) => {
+                        info!("Auto-discovered token from ~/.openclaw/openclaw.json");
+                        Some(t)
                     }
-                }
+                    None => {
+                        warn!(
+                            "No auth token found. Pass --token or configure gateway.auth.token in ~/.openclaw/openclaw.json"
+                        );
+                        None
+                    }
+                },
             };
 
             let config = Config {
@@ -373,12 +371,18 @@ async fn main() -> Result<()> {
             print_banner("Tracking molt activity");
             info!("Wire: {}", config.gateway_url);
             info!("Ledger: {:?}", config.output_dir);
-            info!("Redaction: {}", if config.redact_secrets { "on" } else { "off" });
+            info!(
+                "Redaction: {}",
+                if config.redact_secrets { "on" } else { "off" }
+            );
 
             let session = RecordingSession::start(config, run_name).await?;
             let run_id = session.run_id().clone();
 
-            info!("Tapped into wire — capturing traces ({})", &run_id.0[..8.min(run_id.0.len())]);
+            info!(
+                "Tapped into wire — capturing traces ({})",
+                &run_id.0[..8.min(run_id.0.len())]
+            );
             info!("Ctrl+C to seal the ledger");
 
             tokio::signal::ctrl_c().await?;
@@ -387,20 +391,39 @@ async fn main() -> Result<()> {
             let summary = session.stop().await?;
 
             let id_short = &run_id.0[..8.min(run_id.0.len())];
-            let integrity = if summary.valid { "SEALED" } else { "COMPROMISED" };
+            let integrity = if summary.valid {
+                "SEALED"
+            } else {
+                "COMPROMISED"
+            };
 
-            cprintln!("\n  {} {}\n",
+            cprintln!(
+                "\n  {} {}\n",
                 "Impression captured:".green().bold(),
-                id_short.bright_blue());
-            cprintln!("    Duration: {} | Traces: {} | Size: {} | Ledger: {}",
+                id_short.bright_blue()
+            );
+            cprintln!(
+                "    Duration: {} | Traces: {} | Size: {} | Ledger: {}",
                 format_duration(summary.duration_secs),
                 summary.event_count.to_string().cyan(),
                 format_bytes(summary.size_bytes).dimmed(),
-                if summary.valid { integrity.green().to_string() } else { integrity.red().to_string() },
+                if summary.valid {
+                    integrity.green().to_string()
+                } else {
+                    integrity.red().to_string()
+                },
             );
-            cprintln!("\n    {}",  "Examine the evidence:".dimmed());
-            cprintln!("      clawprint stats --run {} --out {:?}", id_short, summary.out_dir);
-            cprintln!("      clawprint open  --run {} --out {:?}\n", id_short, summary.out_dir);
+            cprintln!("\n    {}", "Examine the evidence:".dimmed());
+            cprintln!(
+                "      clawprint stats --run {} --out {:?}",
+                id_short,
+                summary.out_dir
+            );
+            cprintln!(
+                "      clawprint open  --run {} --out {:?}\n",
+                id_short,
+                summary.out_dir
+            );
         }
 
         Commands::List { out } => {
@@ -442,7 +465,10 @@ async fn main() -> Result<()> {
                 cprintln!(
                     "  {:<14} {:<20} {:<14} {:>8}  {:>10}",
                     id_short.bright_blue(),
-                    meta.started_at.format("%Y-%m-%d %H:%M:%S").to_string().dimmed(),
+                    meta.started_at
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                        .dimmed(),
                     dur.green(),
                     meta.event_count.to_string().cyan(),
                     format_bytes(*size).dimmed(),
@@ -458,7 +484,14 @@ async fn main() -> Result<()> {
             );
         }
 
-        Commands::View { run, out, open, host, port, token } => {
+        Commands::View {
+            run,
+            out,
+            open,
+            host,
+            port,
+            token,
+        } => {
             let host_octets = parse_host(&host)?;
             if host == "0.0.0.0" && token.is_none() {
                 warn!("Binding to 0.0.0.0 without --token: viewer is open to the network");
@@ -467,7 +500,10 @@ async fn main() -> Result<()> {
             let id_short = &run_id.0[..8.min(run_id.0.len())];
             let display_host = if host == "0.0.0.0" { "0.0.0.0" } else { &host };
             print_banner(&format!("Viewer — {}", id_short));
-            cprintln!("  {}\n", format!("http://{}:{}", display_host, port).underline());
+            cprintln!(
+                "  {}\n",
+                format!("http://{}:{}", display_host, port).underline()
+            );
             if token.is_some() {
                 cprintln!("  {}\n", "Auth: Bearer token required".green());
             }
@@ -480,7 +516,13 @@ async fn main() -> Result<()> {
             start_viewer(out, host_octets, port, token).await?;
         }
 
-        Commands::Open { run, out, host, port, token } => {
+        Commands::Open {
+            run,
+            out,
+            host,
+            port,
+            token,
+        } => {
             let host_octets = parse_host(&host)?;
             if host == "0.0.0.0" && token.is_none() {
                 warn!("Binding to 0.0.0.0 without --token: viewer is open to the network");
@@ -494,7 +536,8 @@ async fn main() -> Result<()> {
                         cprintln!("{}", "No recorded runs found.".yellow());
                         return Ok(());
                     }
-                    let (latest_id, _, _) = runs.into_iter()
+                    let (latest_id, _, _) = runs
+                        .into_iter()
                         .max_by_key(|(_, meta, _)| meta.started_at)
                         .unwrap();
                     latest_id
@@ -513,7 +556,12 @@ async fn main() -> Result<()> {
             start_viewer(out, host_octets, port, token).await?;
         }
 
-        Commands::Replay { run, out, offline, export } => {
+        Commands::Replay {
+            run,
+            out,
+            offline,
+            export,
+        } => {
             let run_id = resolve_run_id(&run, &out)?;
             info!("Replaying run: {}", run_id.0);
 
@@ -555,8 +603,14 @@ async fn main() -> Result<()> {
                 Ok(true) => {
                     cprintln!("{}", "INTACT".green().bold());
                     cprintln!("  Traces:    {}", storage.event_count().to_string().cyan());
-                    cprintln!("  Root hash: {}", storage.root_hash().unwrap_or_default().dimmed());
-                    cprintln!("  {}", "No tampering detected. The trail is clean.".dimmed());
+                    cprintln!(
+                        "  Root hash: {}",
+                        storage.root_hash().unwrap_or_default().dimmed()
+                    );
+                    cprintln!(
+                        "  {}",
+                        "No tampering detected. The trail is clean.".dimmed()
+                    );
                 }
                 Ok(false) => {
                     cprintln!("{}", "COMPROMISED".red().bold());
@@ -571,7 +625,13 @@ async fn main() -> Result<()> {
         }
 
         #[cfg(feature = "mcp")]
-        Commands::Mcp { out, transport, host, port, token } => {
+        Commands::Mcp {
+            out,
+            transport,
+            host,
+            port,
+            token,
+        } => {
             match transport.as_str() {
                 "stdio" => {
                     // MCP server: stdout is JSON-RPC only, all logging to stderr
@@ -579,28 +639,34 @@ async fn main() -> Result<()> {
                         .serve(rmcp::transport::stdio())
                         .await
                         .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
-                    service.waiting().await
+                    service
+                        .waiting()
+                        .await
                         .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
                 }
                 "sse" => {
                     let host_octets = parse_host(&host)?;
                     if host == "0.0.0.0" && token.is_none() {
-                        warn!("Binding to 0.0.0.0 without --token: MCP server is open to the network");
+                        warn!(
+                            "Binding to 0.0.0.0 without --token: MCP server is open to the network"
+                        );
                     }
                     print_banner("MCP Server (SSE)");
 
                     let ct = tokio_util::sync::CancellationToken::new();
                     let ledger_path = out.clone();
-                    let service: StreamableHttpService<clawprint::mcp::ClawprintMcp, LocalSessionManager> =
-                        StreamableHttpService::new(
-                            move || Ok(clawprint::mcp::ClawprintMcp::new(ledger_path.clone())),
-                            Default::default(),
-                            StreamableHttpServerConfig {
-                                stateful_mode: true,
-                                cancellation_token: ct.child_token(),
-                                ..Default::default()
-                            },
-                        );
+                    let service: StreamableHttpService<
+                        clawprint::mcp::ClawprintMcp,
+                        LocalSessionManager,
+                    > = StreamableHttpService::new(
+                        move || Ok(clawprint::mcp::ClawprintMcp::new(ledger_path.clone())),
+                        Default::default(),
+                        StreamableHttpServerConfig {
+                            stateful_mode: true,
+                            cancellation_token: ct.child_token(),
+                            ..Default::default()
+                        },
+                    );
 
                     let app = axum::Router::new().nest_service("/mcp", service);
                     let app = if let Some(ref tok) = token {
@@ -614,7 +680,10 @@ async fn main() -> Result<()> {
 
                     let addr = std::net::SocketAddr::from((host_octets, port));
 
-                    cprintln!("  MCP endpoint: {}\n", format!("http://{}:{}/mcp", host, port).underline());
+                    cprintln!(
+                        "  MCP endpoint: {}\n",
+                        format!("http://{}:{}/mcp", host, port).underline()
+                    );
                     if token.is_some() {
                         cprintln!("  {}\n", "Auth: Bearer token required".green());
                     }
@@ -652,18 +721,18 @@ async fn main() -> Result<()> {
                     info!("Using token from --token flag");
                     Some(t)
                 }
-                None => {
-                    match discover_openclaw_token() {
-                        Some(t) => {
-                            info!("Auto-discovered token from ~/.openclaw/openclaw.json");
-                            Some(t)
-                        }
-                        None => {
-                            warn!("No auth token found. Pass --token or configure gateway.auth.token in ~/.openclaw/openclaw.json");
-                            None
-                        }
+                None => match discover_openclaw_token() {
+                    Some(t) => {
+                        info!("Auto-discovered token from ~/.openclaw/openclaw.json");
+                        Some(t)
                     }
-                }
+                    None => {
+                        warn!(
+                            "No auth token found. Pass --token or configure gateway.auth.token in ~/.openclaw/openclaw.json"
+                        );
+                        None
+                    }
+                },
             };
 
             let config = Config {
@@ -678,7 +747,10 @@ async fn main() -> Result<()> {
             print_banner("Watching the wire");
             info!("Wire: {}", config.gateway_url);
             info!("Ledger: {:?}", config.output_dir);
-            info!("Redaction: {}", if config.redact_secrets { "on" } else { "off" });
+            info!(
+                "Redaction: {}",
+                if config.redact_secrets { "on" } else { "off" }
+            );
 
             run_daemon(config).await?;
         }
@@ -714,7 +786,11 @@ async fn main() -> Result<()> {
                     bar.green(),
                 );
             }
-            cprintln!("  {:<16} {:>6}", "TOTAL".bold(), total.to_string().bright_white().bold());
+            cprintln!(
+                "  {:<16} {:>6}",
+                "TOTAL".bold(),
+                total.to_string().bright_white().bold()
+            );
 
             // Agent runs
             let agent_runs = storage.agent_run_ids()?;
