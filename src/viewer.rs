@@ -142,9 +142,9 @@ async fn index_handler(State(state): State<ViewerState>) -> impl IntoResponse {
             };
             let dur = format_duration_html(meta.started_at, meta.ended_at);
             let status = if meta.ended_at.is_some() {
-                r#"<span class="badge complete">Complete</span>"#
+                r#"<span class="badge complete">Sealed</span>"#
             } else {
-                r#"<span class="badge progress">Recording</span>"#
+                r#"<span class="badge progress">Tracking</span>"#
             };
             format!(
                 r#"<a href="/view/{id}" class="run-card">
@@ -324,21 +324,24 @@ h2{font-size:.875rem;font-weight:600;text-transform:uppercase;letter-spacing:.05
 .badge.progress{background:#fff7ed;color:var(--orange)}
 .lock{font-size:.875rem;margin-left:auto;opacity:.4}
 .run-meta{display:flex;gap:24px;font-size:.8rem;color:var(--dim)}
+footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--border);text-align:center;font-size:.75rem;color:var(--dim);letter-spacing:.02em}
+footer span{opacity:.5}
 </style>
 </head>
 <body>
 <div class="wrap">
 <header>
-<h1>Clawprint</h1>
-<p>Audit trail for OpenClaw agent activity</p>
+<h1>><> Clawprint</h1>
+<p>Every molt leaves a mark. Trace. Verify. Trust.</p>
 </header>
 <div class="stats">
-<div><div class="stat-label">Runs</div><div class="stat-value">{{TOTAL_RUNS}}</div></div>
+<div><div class="stat-label">Impressions</div><div class="stat-value">{{TOTAL_RUNS}}</div></div>
 <div><div class="stat-label">Traces</div><div class="stat-value">{{TOTAL_EVENTS}}</div></div>
-<div><div class="stat-label">Storage</div><div class="stat-value">{{TOTAL_SIZE}}</div></div>
+<div><div class="stat-label">Evidence</div><div class="stat-value">{{TOTAL_SIZE}}</div></div>
 </div>
-<h2>Recorded runs</h2>
+<h2>Recorded impressions</h2>
 {{RUNS}}
+<footer><span>Watching the wire</span></footer>
 </div>
 </body>
 </html>"##;
@@ -397,28 +400,30 @@ a.back:hover{color:var(--text)}
 .pbtn.cur{background:var(--text);color:#fff;border-color:var(--text)}
 .pbtn:disabled{opacity:.3;cursor:not-allowed}
 .loading{text-align:center;padding:40px;color:var(--dim);font-size:.875rem}
+footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--border);text-align:center;font-size:.75rem;color:var(--dim);letter-spacing:.02em}
+footer span{opacity:.5}
 </style>
 </head>
 <body>
 <div class="wrap">
-<a href="/" class="back">&larr; All runs</a>
+<a href="/" class="back">&larr; All impressions</a>
 <div class="hdr">
-<h1><span id="rid">{{RUN_ID}}</span></h1>
+<h1>Impression <span id="rid">{{RUN_ID}}</span></h1>
 </div>
 <div class="stats">
 <div><div class="stat-label">Traces</div><div class="stat-value" id="s-events">-</div></div>
 <div><div class="stat-label">Duration</div><div class="stat-value" id="s-dur">-</div></div>
-<div><div class="stat-label">Agent runs</div><div class="stat-value" id="s-agents">-</div></div>
-<div><div class="stat-label">Integrity</div><div class="stat-value" id="s-integrity">-</div></div>
+<div><div class="stat-label">Molts</div><div class="stat-value" id="s-agents">-</div></div>
+<div><div class="stat-label">Chain of evidence</div><div class="stat-value" id="s-integrity">-</div></div>
 </div>
 
 <div class="section">
-<h2>Breakdown</h2>
+<h2>Evidence breakdown</h2>
 <div id="chart"></div>
 </div>
 
 <div class="section">
-<h2>Traces</h2>
+<h2>Trace log</h2>
 <div class="filters">
 <button class="fbtn" data-k="AGENT_EVENT">AGENT_EVENT</button>
 <button class="fbtn" data-k="OUTPUT_CHUNK">OUTPUT_CHUNK</button>
@@ -432,6 +437,7 @@ a.back:hover{color:var(--text)}
 <div class="events" id="evlist"><div class="loading">Loading...</div></div>
 <div class="pager" id="pager"></div>
 </div>
+<footer><span>Inspecting the evidence</span></footer>
 </div>
 
 <script>
