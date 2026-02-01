@@ -2,6 +2,8 @@
   <img src="clawprint.jpg" alt="Clawprint" width="300">
 </p>
 
+<h1 align="center">Clawprint</h1>
+
 <p align="center"><b>Every molt leaves a mark. Trace. Verify. Trust.</b></p>
 
 Clawprint is a tamper-evident audit trail for OpenClaw agent runs. It silently taps the gateway wire, capturing every trace a molt leaves behind — tool calls, outputs, lifecycle events — and seals them in a SHA-256 hash chain ledger. Replay sessions offline, inspect the evidence through a cybersecurity-style dashboard, or query activity from Claude Desktop via MCP.
