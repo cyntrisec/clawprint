@@ -7,10 +7,11 @@
 //!   clawprint replay --run <run_id> --offline
 //!   clawprint stats --run <run_id>
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
 use std::io::{IsTerminal, Write as _};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
@@ -57,6 +58,12 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+fn parse_host(host: &str) -> Result<[u8; 4]> {
+    let addr: Ipv4Addr = host.parse()
+        .map_err(|_| anyhow::anyhow!("Invalid host address: {}", host))?;
+    Ok(addr.octets())
+}
+
 /// Print the large CLAWPRINT ASCII text banner (for startup/main display)
 fn print_banner_large() {
     let art = r#"
@@ -89,6 +96,11 @@ fn print_banner(subtitle: &str) {
 
 #[cfg(feature = "mcp")]
 use rmcp::ServiceExt as _;
+#[cfg(feature = "mcp")]
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpService, StreamableHttpServerConfig,
+    session::local::LocalSessionManager,
+};
 
 use clawprint::{
     daemon::run_daemon,
@@ -148,6 +160,9 @@ enum Commands {
         /// Open in browser automatically
         #[arg(long)]
         open: bool,
+        /// Host to bind the viewer (use 0.0.0.0 for network access)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
         /// Port for viewer server
         #[arg(short, long, default_value = "8080")]
         port: u16,
@@ -203,6 +218,15 @@ enum Commands {
         /// Directory containing the ledger
         #[arg(short, long, default_value = "./clawprints")]
         out: PathBuf,
+        /// Transport: "stdio" (default, for local Claude Desktop) or "sse" (for network access)
+        #[arg(long, default_value = "stdio")]
+        transport: String,
+        /// Host to bind SSE server (only used with --transport sse)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        /// Port for SSE server (only used with --transport sse)
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
     },
     /// Open a recording in the web viewer (latest run if none specified)
     Open {
@@ -212,6 +236,9 @@ enum Commands {
         /// Output directory
         #[arg(short, long, default_value = "./clawprints")]
         out: PathBuf,
+        /// Host to bind the viewer (use 0.0.0.0 for network access)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
         /// Port for viewer server
         #[arg(short, long, default_value = "8080")]
         port: u16,
@@ -422,21 +449,24 @@ async fn main() -> Result<()> {
             );
         }
 
-        Commands::View { run, out, open, port } => {
+        Commands::View { run, out, open, host, port } => {
+            let host_octets = parse_host(&host)?;
             let run_id = resolve_run_id(&run, &out)?;
             let id_short = &run_id.0[..8.min(run_id.0.len())];
+            let display_host = if host == "0.0.0.0" { "0.0.0.0" } else { &host };
             print_banner(&format!("Viewer — {}", id_short));
-            cprintln!("  {}\n", format!("http://127.0.0.1:{}", port).underline());
+            cprintln!("  {}\n", format!("http://{}:{}", display_host, port).underline());
 
             if open {
                 let url = format!("http://127.0.0.1:{}/view/{}", port, run_id.0);
                 let _ = open::that(&url);
             }
 
-            start_viewer(out, port).await?;
+            start_viewer(out, host_octets, port).await?;
         }
 
-        Commands::Open { run, out, port } => {
+        Commands::Open { run, out, host, port } => {
+            let host_octets = parse_host(&host)?;
             let run_id = match run {
                 Some(r) => resolve_run_id(&r, &out)?,
                 None => {
@@ -459,7 +489,7 @@ async fn main() -> Result<()> {
             cprintln!("  {}\n", url.underline());
 
             let _ = open::that(&url);
-            start_viewer(out, port).await?;
+            start_viewer(out, host_octets, port).await?;
         }
 
         Commands::Replay { run, out, offline, export } => {
@@ -520,14 +550,58 @@ async fn main() -> Result<()> {
         }
 
         #[cfg(feature = "mcp")]
-        Commands::Mcp { out } => {
-            // MCP server: stdout is JSON-RPC only, all logging to stderr
-            let service = clawprint::mcp::ClawprintMcp::new(out)
-                .serve(rmcp::transport::stdio())
-                .await
-                .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
-            service.waiting().await
-                .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
+        Commands::Mcp { out, transport, host, port } => {
+            match transport.as_str() {
+                "stdio" => {
+                    // MCP server: stdout is JSON-RPC only, all logging to stderr
+                    let service = clawprint::mcp::ClawprintMcp::new(out)
+                        .serve(rmcp::transport::stdio())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
+                    service.waiting().await
+                        .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
+                }
+                "sse" => {
+                    let host_octets = parse_host(&host)?;
+                    print_banner("MCP Server (SSE)");
+
+                    let ct = tokio_util::sync::CancellationToken::new();
+                    let ledger_path = out.clone();
+                    let service: StreamableHttpService<clawprint::mcp::ClawprintMcp, LocalSessionManager> =
+                        StreamableHttpService::new(
+                            move || Ok(clawprint::mcp::ClawprintMcp::new(ledger_path.clone())),
+                            Default::default(),
+                            StreamableHttpServerConfig {
+                                stateful_mode: true,
+                                cancellation_token: ct.child_token(),
+                                ..Default::default()
+                            },
+                        );
+
+                    let app = axum::Router::new().nest_service("/mcp", service);
+                    let addr = std::net::SocketAddr::from((host_octets, port));
+
+                    cprintln!("  MCP endpoint: {}\n", format!("http://{}:{}/mcp", host, port).underline());
+                    cprintln!("  Claude Desktop config:");
+                    cprintln!("  {{");
+                    cprintln!("    \"mcpServers\": {{");
+                    cprintln!("      \"clawprint\": {{");
+                    cprintln!("        \"url\": \"http://{}:{}/mcp\"", host, port);
+                    cprintln!("      }}");
+                    cprintln!("    }}");
+                    cprintln!("  }}\n");
+                    cprintln!("  Ledger: {:?}", out);
+
+                    let listener = tokio::net::TcpListener::bind(addr).await?;
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async move {
+                            tokio::signal::ctrl_c().await.ok();
+                            ct.cancel();
+                        })
+                        .await?;
+                }
+                other => bail!("Unknown transport '{}'. Use 'stdio' or 'sse'.", other),
+            }
         }
 
         Commands::Daemon {

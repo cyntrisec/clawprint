@@ -23,19 +23,19 @@ struct ViewerState {
     base_path: PathBuf,
 }
 
-pub async fn start_viewer(base_path: PathBuf, port: u16) -> Result<()> {
+pub async fn start_viewer(base_path: PathBuf, host: [u8; 4], port: u16) -> Result<()> {
     let state = ViewerState { base_path };
 
     let app = Router::new()
         .route("/", get(index_handler))
-        .route("/view/:run_id", get(view_run_handler))
+        .route("/view/{run_id}", get(view_run_handler))
         .route("/api/runs", get(list_runs_handler))
-        .route("/api/runs/:run_id", get(get_run_handler))
-        .route("/api/runs/:run_id/events", get(get_events_handler))
-        .route("/api/runs/:run_id/stats", get(get_run_stats_handler))
+        .route("/api/runs/{run_id}", get(get_run_handler))
+        .route("/api/runs/{run_id}/events", get(get_events_handler))
+        .route("/api/runs/{run_id}/stats", get(get_run_stats_handler))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::from((host, port));
     info!("Viewer starting on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
