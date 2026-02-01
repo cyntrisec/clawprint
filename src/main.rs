@@ -57,25 +57,31 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Print the Clawprint crab pincer banner with an optional subtitle
-fn print_banner(subtitle: &str) {
+/// Print the large CLAWPRINT ASCII text banner (for startup/main display)
+fn print_banner_large() {
     let art = r#"
-    )       (
-     )     (
-      )   (
-       ) (
-        V
-       ( )
-      (   )
+  ╔═╗╦  ╔═╗╦ ╦╔═╗╦═╗╦╔╗╔╔╦╗
+  ║  ║  ╠═╣║║║╠═╝╠╦╝║║║║ ║
+  ╚═╝╩═╝╩ ╩╚╩╝╩  ╩╚═╩╝╚╝ ╩
 "#;
     for line in art.lines() {
         if !line.is_empty() {
-            cprintln!("{}", line.bright_cyan());
+            cprintln!("{}", line.bright_cyan().bold());
         }
     }
     cprintln!(
-        "   {} {} ~ {}\n",
-        "clawprint".bright_cyan().bold(),
+        "  {} ~ {}\n",
+        format!("v{}", env!("CARGO_PKG_VERSION")).dimmed(),
+        "Every molt leaves a mark.".bright_white(),
+    );
+}
+
+/// Print a small per-command header with crab icon
+fn print_banner(subtitle: &str) {
+    cprintln!(
+        "  {} {} {} ~ {}\n",
+        "><>".bright_cyan().bold(),
+        "clawprint".bright_cyan(),
         format!("v{}", env!("CARGO_PKG_VERSION")).dimmed(),
         subtitle.bright_white(),
     );
@@ -369,6 +375,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
+            print_banner_large();
             print_banner("Recordings");
             cprintln!(
                 "  {:<14} {:<20} {:<14} {:>8}  {:>10}",
