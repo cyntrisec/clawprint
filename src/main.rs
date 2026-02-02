@@ -104,11 +104,11 @@ use rmcp::transport::streamable_http_server::{
 
 use clawprint::{
     Config,
-    daemon::run_daemon,
+    daemon::{run_daemon, run_daemon_with_shutdown},
     record::RecordingSession,
     replay::{diff_runs, generate_transcript, replay_run},
     storage::{RunStorage, list_runs_with_stats, resolve_run_id},
-    viewer::start_viewer,
+    viewer::{start_viewer, start_viewer_with_shutdown},
 };
 
 #[derive(Parser)]
@@ -252,6 +252,48 @@ enum Commands {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Run multiple services (daemon, viewer, MCP) in a single process
+    Serve {
+        /// Enable daemon (continuous recording)
+        #[arg(long)]
+        daemon: bool,
+        /// Enable web viewer
+        #[arg(long)]
+        viewer: bool,
+        /// Enable MCP SSE server
+        #[cfg(feature = "mcp")]
+        #[arg(long)]
+        mcp: bool,
+        /// Gateway WebSocket URL (for daemon)
+        #[arg(short, long, default_value = "ws://127.0.0.1:18789")]
+        gateway: String,
+        /// Output directory
+        #[arg(short, long, default_value = "./clawprints")]
+        out: PathBuf,
+        /// Gateway auth token (auto-discovered from ~/.openclaw/openclaw.json if omitted)
+        #[arg(short, long)]
+        token: Option<String>,
+        /// Disable secret redaction (for daemon)
+        #[arg(long)]
+        no_redact: bool,
+        /// Batch size for SQLite commits (for daemon)
+        #[arg(long, default_value = "100")]
+        batch_size: usize,
+        /// Host to bind the viewer
+        #[arg(long, default_value = "127.0.0.1")]
+        viewer_host: String,
+        /// Port for viewer server
+        #[arg(long, default_value = "8080")]
+        viewer_port: u16,
+        /// Host to bind the MCP SSE server
+        #[cfg(feature = "mcp")]
+        #[arg(long, default_value = "0.0.0.0")]
+        mcp_host: String,
+        /// Port for MCP SSE server
+        #[cfg(feature = "mcp")]
+        #[arg(long, default_value = "3000")]
+        mcp_port: u16,
+    },
     /// Run as a 24/7 daemon recording to a continuous ledger
     Daemon {
         /// Gateway WebSocket URL
@@ -312,6 +354,46 @@ fn discover_openclaw_token() -> Option<String> {
         .map(|s| s.to_string())
 }
 
+#[cfg(feature = "mcp")]
+async fn start_mcp_sse_with_shutdown(
+    ledger_path: PathBuf,
+    host: [u8; 4],
+    port: u16,
+    token: Option<String>,
+    ct: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let mcp_ct = ct.child_token();
+    let service: StreamableHttpService<clawprint::mcp::ClawprintMcp, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || Ok(clawprint::mcp::ClawprintMcp::new(ledger_path.clone())),
+            Default::default(),
+            StreamableHttpServerConfig {
+                stateful_mode: true,
+                cancellation_token: mcp_ct,
+                ..Default::default()
+            },
+        );
+
+    let app = axum::Router::new().nest_service("/mcp", service);
+    let app = if let Some(ref tok) = token {
+        app.layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::new(tok.clone()),
+            clawprint::viewer::bearer_auth,
+        ))
+    } else {
+        app
+    };
+
+    let addr = std::net::SocketAddr::from((host, port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move {
+            ct.cancelled().await;
+        })
+        .await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Respect NO_COLOR env var and non-TTY output
@@ -323,7 +405,9 @@ async fn main() -> Result<()> {
 
     // Only show info logs for record command; others use warn to keep output clean
     let default_log = match &cli.command {
-        Commands::Record { .. } | Commands::Daemon { .. } => "clawprint=info",
+        Commands::Record { .. } | Commands::Daemon { .. } | Commands::Serve { .. } => {
+            "clawprint=info"
+        }
         _ => "clawprint=warn",
     };
 
@@ -707,6 +791,149 @@ async fn main() -> Result<()> {
                 }
                 other => bail!("Unknown transport '{}'. Use 'stdio' or 'sse'.", other),
             }
+        }
+
+        Commands::Serve {
+            daemon,
+            viewer,
+            #[cfg(feature = "mcp")]
+            mcp,
+            gateway,
+            out,
+            token,
+            no_redact,
+            batch_size,
+            viewer_host,
+            viewer_port,
+            #[cfg(feature = "mcp")]
+            mcp_host,
+            #[cfg(feature = "mcp")]
+            mcp_port,
+        } => {
+            #[cfg(not(feature = "mcp"))]
+            let mcp = false;
+            #[cfg(not(feature = "mcp"))]
+            let mcp_host = "0.0.0.0".to_string();
+            #[cfg(not(feature = "mcp"))]
+            let mcp_port: u16 = 3000;
+
+            if !daemon && !viewer && !mcp {
+                bail!("Enable at least one service: --daemon, --viewer, or --mcp");
+            }
+
+            print_banner("Serving");
+
+            let ct = tokio_util::sync::CancellationToken::new();
+
+            // Ctrl+C handler
+            {
+                let ct = ct.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::signal::ctrl_c().await;
+                    ct.cancel();
+                });
+            }
+
+            let mut handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+
+            if daemon {
+                let auth_token = match token.clone() {
+                    Some(t) => {
+                        info!("Using token from --token flag");
+                        Some(t)
+                    }
+                    None => match discover_openclaw_token() {
+                        Some(t) => {
+                            info!("Auto-discovered token from ~/.openclaw/openclaw.json");
+                            Some(t)
+                        }
+                        None => {
+                            warn!(
+                                "No auth token found. Pass --token or configure gateway.auth.token in ~/.openclaw/openclaw.json"
+                            );
+                            None
+                        }
+                    },
+                };
+
+                let config = Config {
+                    output_dir: out.clone(),
+                    redact_secrets: !no_redact,
+                    gateway_url: gateway.clone(),
+                    auth_token,
+                    batch_size,
+                    flush_interval_ms: 200,
+                };
+
+                cprintln!(
+                    "  {} Daemon: wire={}",
+                    "+".green().bold(),
+                    config.gateway_url.dimmed(),
+                );
+
+                let ct = ct.clone();
+                handles.push(tokio::spawn(async move {
+                    run_daemon_with_shutdown(config, ct).await
+                }));
+            }
+
+            if viewer {
+                let vh_octets = parse_host(&viewer_host)?;
+                if viewer_host == "0.0.0.0" && token.is_none() {
+                    warn!(
+                        "Binding viewer to 0.0.0.0 without --token: viewer is open to the network"
+                    );
+                }
+
+                cprintln!(
+                    "  {} Viewer: {}",
+                    "+".green().bold(),
+                    format!("http://{}:{}", viewer_host, viewer_port).underline(),
+                );
+
+                let base_path = out.clone();
+                let tok = token.clone();
+                let ct = ct.clone();
+                handles.push(tokio::spawn(async move {
+                    start_viewer_with_shutdown(base_path, vh_octets, viewer_port, tok, ct).await
+                }));
+            }
+
+            #[cfg(feature = "mcp")]
+            if mcp {
+                let mh_octets = parse_host(&mcp_host)?;
+                if mcp_host == "0.0.0.0" && token.is_none() {
+                    warn!(
+                        "Binding MCP to 0.0.0.0 without --token: MCP server is open to the network"
+                    );
+                }
+
+                cprintln!(
+                    "  {} MCP SSE: {}",
+                    "+".green().bold(),
+                    format!("http://{}:{}/mcp", mcp_host, mcp_port).underline(),
+                );
+
+                let ledger_path = out.clone();
+                let tok = token.clone();
+                let ct = ct.clone();
+                handles.push(tokio::spawn(async move {
+                    start_mcp_sse_with_shutdown(ledger_path, mh_octets, mcp_port, tok, ct).await
+                }));
+            }
+
+            cprintln!("\n  ~ Ctrl+C to shut down all services\n");
+
+            let results = futures::future::join_all(handles).await;
+            for result in results {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!("Service error: {}", e),
+                    Err(e) => warn!("Task panicked: {}", e),
+                }
+            }
+
+            info!("All services stopped");
         }
 
         Commands::Daemon {

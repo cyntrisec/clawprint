@@ -71,6 +71,43 @@ pub async fn start_viewer(
     Ok(())
 }
 
+/// Start the viewer with an external cancellation token for coordinated shutdown.
+pub async fn start_viewer_with_shutdown(
+    base_path: PathBuf,
+    host: [u8; 4],
+    port: u16,
+    token: Option<String>,
+    ct: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let state = ViewerState { base_path };
+
+    let app = Router::new()
+        .route("/", get(index_handler))
+        .route("/view/{run_id}", get(view_run_handler))
+        .route("/api/runs", get(list_runs_handler))
+        .route("/api/runs/{run_id}", get(get_run_handler))
+        .route("/api/runs/{run_id}/events", get(get_events_handler))
+        .route("/api/runs/{run_id}/stats", get(get_run_stats_handler))
+        .with_state(state);
+
+    let app = if let Some(tok) = token {
+        app.layer(middleware::from_fn_with_state(Arc::new(tok), bearer_auth))
+    } else {
+        app
+    };
+
+    let addr = SocketAddr::from((host, port));
+    info!("Viewer starting on http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move {
+            ct.cancelled().await;
+        })
+        .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -21,6 +21,20 @@ use crate::{
 
 /// Run the daemon: connect to gateway, record to ledger, auto-reconnect.
 pub async fn run_daemon(config: Config) -> Result<()> {
+    let ct = tokio_util::sync::CancellationToken::new();
+    let ct_clone = ct.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        ct_clone.cancel();
+    });
+    run_daemon_with_shutdown(config, ct).await
+}
+
+/// Run the daemon with an external cancellation token for coordinated shutdown.
+pub async fn run_daemon_with_shutdown(
+    config: Config,
+    ct: tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let ledger_path = config.output_dir.clone();
     let ledger = Ledger::open(&ledger_path, config.batch_size)?;
     let ledger = Arc::new(Mutex::new(ledger));
@@ -52,11 +66,14 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 
     // Shutdown flag — survives across reconnect loop iterations
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        shutdown_clone.store(true, Ordering::SeqCst);
-    });
+    {
+        let shutdown_clone = shutdown.clone();
+        let ct_clone = ct.clone();
+        tokio::spawn(async move {
+            ct_clone.cancelled().await;
+            shutdown_clone.store(true, Ordering::SeqCst);
+        });
+    }
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
