@@ -194,10 +194,9 @@ The `view` command launches a minimal web dashboard at `http://127.0.0.1:8080`:
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/runs` | List all runs with metadata and size |
+| `GET /api/runs/:id` | Run metadata (event count, root hash, chain validity) |
 | `GET /api/runs/:id/events` | Paginated events with `?kind=X&search=Y&page=N&per_page=50` |
 | `GET /api/runs/:id/stats` | Event breakdown, timeline, agent run count |
-| `GET /api/runs/:id/meta` | Run metadata |
-| `GET /api/runs/:id/export` | Full event export as JSON |
 
 ## Storage Format
 
@@ -275,6 +274,137 @@ Clawprint auto-discovers the gateway auth token from `~/.openclaw/openclaw.json`
 
 Or pass it directly: `clawprint record --token <token>`
 
+## Remote Access with WireGuard
+
+If Clawprint runs on a remote machine (AWS, Mac Mini, etc.) and you want to access the dashboard or MCP server from other devices, use WireGuard to create an encrypted private network. No ports are exposed to the public internet — only the WireGuard UDP port.
+
+### Install WireGuard
+
+```bash
+# Ubuntu/Debian
+sudo apt install wireguard
+
+# macOS
+brew install wireguard-tools
+
+# Windows — download from https://www.wireguard.com/install/
+```
+
+### Generate keys (on each machine)
+
+```bash
+wg genkey | tee privatekey | wg pubkey > publickey
+```
+
+On Windows, the WireGuard GUI generates keys automatically when you add a new tunnel.
+
+### Server config (Clawprint host)
+
+```ini
+# /etc/wireguard/wg0.conf
+[Interface]
+Address = 10.0.0.1/24
+ListenPort = 51820
+PrivateKey = <server-private-key>
+
+# macOS client
+[Peer]
+PublicKey = <client1-public-key>
+AllowedIPs = 10.0.0.2/32
+
+# Linux client
+[Peer]
+PublicKey = <client2-public-key>
+AllowedIPs = 10.0.0.3/32
+
+# Windows client
+[Peer]
+PublicKey = <client3-public-key>
+AllowedIPs = 10.0.0.4/32
+```
+
+### Client config (macOS / Linux)
+
+```ini
+# /etc/wireguard/wg0.conf
+[Interface]
+Address = 10.0.0.2/24
+PrivateKey = <client-private-key>
+
+[Peer]
+PublicKey = <server-public-key>
+Endpoint = <server-public-ip>:51820
+AllowedIPs = 10.0.0.0/24
+PersistentKeepalive = 25
+```
+
+### Client config (Windows)
+
+Open the WireGuard app, click **Add Tunnel > Add empty tunnel**, and paste:
+
+```ini
+[Interface]
+Address = 10.0.0.4/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = <server-public-key>
+Endpoint = <server-public-ip>:51820
+AllowedIPs = 10.0.0.0/24
+PersistentKeepalive = 25
+```
+
+### Start the tunnel
+
+```bash
+# Linux / macOS
+sudo wg-quick up wg0
+
+# Enable on boot
+sudo systemctl enable wg-quick@wg0   # Linux
+sudo brew services start wireguard    # macOS
+```
+
+On Windows, click **Activate** in the WireGuard GUI.
+
+### Firewall
+
+Only UDP port 51820 needs to be open on the server:
+
+- **AWS**: Add an inbound security group rule for UDP 51820
+- **Mac Mini behind a router**: Forward UDP 51820 to the Mac Mini's local IP
+
+### Run Clawprint over WireGuard
+
+Bind to the WireGuard IP so Clawprint is only reachable through the tunnel:
+
+```bash
+# Web dashboard
+clawprint open --out ./clawprints --host 10.0.0.1 --token mysecret
+
+# MCP server
+clawprint mcp --transport sse --host 10.0.0.1 --port 3000 --token mysecret --out ./clawprints
+```
+
+From any client on the WireGuard network, access `http://10.0.0.1:8080` in a browser or configure Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "clawprint": {
+      "url": "http://10.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+### Verify the tunnel
+
+```bash
+sudo wg show    # Check handshake and transfer stats
+ping 10.0.0.1   # Test connectivity
+```
+
 ## Configuration
 
 | Option | Default | Description |
@@ -284,7 +414,7 @@ Or pass it directly: `clawprint record --token <token>`
 | `--token` | auto-discovered | Gateway auth token (record/daemon) or HTTP bearer token (view/open/mcp) |
 | `--no-redact` | `false` | Disable secret redaction |
 | `--batch-size` | `100` | SQLite batch commit size |
-| `--host` | `127.0.0.1` | Bind address for viewer/MCP (use `0.0.0.0` for network access) |
+| `--host` | `127.0.0.1` (viewer/open), `0.0.0.0` (MCP SSE) | Bind address for viewer/MCP |
 | `--port` | `8080` / `3000` | Web viewer / MCP SSE server port |
 | `--transport` | `stdio` | MCP transport: `stdio` (local) or `sse` (network) |
 | `RUST_LOG` | `clawprint=info` | Log level (set to `clawprint=debug` for verbose output) |
@@ -295,7 +425,7 @@ Every trace includes a SHA-256 hash computed from its canonical form. Each trace
 
 ```bash
 $ clawprint verify --run <run_id> --out ./clawprints
-  Inspecting chain of evidence for a1b2c3d4... SEALED
+  Inspecting chain of evidence for a1b2c3d4... INTACT
   Traces:    1234
   Root hash: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 ```
