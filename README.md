@@ -7,12 +7,12 @@
 <p align="center"><b>Every molt leaves a mark. Trace. Verify. Trust.</b></p>
 
 <p align="center">
-  <a href="https://github.com/cyntrisec/clawprint/actions/workflows/ci.yml"><img src="https://github.com/cyntrisec/clawprint/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/cyntrisec/clawprint/releases/latest"><img src="https://img.shields.io/github/v/release/cyntrisec/clawprint" alt="Release"></a>
+  <a href="https://github.com/tsyrulb/clawprint/actions/workflows/ci.yml"><img src="https://github.com/tsyrulb/clawprint/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/tsyrulb/clawprint/releases/latest"><img src="https://img.shields.io/github/v/release/tsyrulb/clawprint" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-> **Cyntrisec Labs project.** Cyntrisec's main product is [EphemeralML](https://github.com/cyntrisec/EphemeralML) — confidential AI inference with cryptographic receipts ([AIR v1](https://datatracker.ietf.org/doc/draft-tsyrulnikov-rats-attested-inference-receipt/)). Clawprint is a standalone Labs tool for agent audit trails.
+> **Historical personal project.** Clawprint was created before Cyntrisec narrowed its company focus to EphemeralML and AIR v1. It is not a current Cyntrisec product, support surface, or commercial offering. The current Cyntrisec product work is EphemeralML: confidential AI inference with cryptographic receipts.
 
 Clawprint is a tamper-evident audit trail for OpenClaw agent runs. It silently taps the gateway wire, capturing every trace a molt leaves behind — tool calls, outputs, lifecycle events — and seals them in a SHA-256 hash chain ledger. Replay sessions offline, inspect the evidence through the web dashboard, or query activity from Claude Desktop via MCP.
 
@@ -36,7 +36,7 @@ Clawprint is a tamper-evident audit trail for OpenClaw agent runs. It silently t
 
 ```bash
 # Install
-curl -fsSL https://raw.githubusercontent.com/cyntrisec/clawprint/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tsyrulb/clawprint/master/install.sh | bash
 
 # Or build from source
 cargo install --path .
@@ -500,14 +500,14 @@ $ clawprint verify --run <run_id> --out ./clawprints
 ### Prebuilt binaries
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cyntrisec/clawprint/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tsyrulb/clawprint/master/install.sh | bash
 ```
 
 Downloads the latest release binary for your platform (Linux x86_64/aarch64, macOS Intel/Apple Silicon). Falls back to building from source if no binary is available.
 
 ### Windows
 
-Download `clawprint-windows-x86_64.exe` from the [latest release](https://github.com/cyntrisec/clawprint/releases/latest) and add it to your PATH.
+Download `clawprint-windows-x86_64.exe` from the [latest release](https://github.com/tsyrulb/clawprint/releases/latest) and add it to your PATH.
 
 ### From source
 
